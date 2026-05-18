@@ -113,6 +113,28 @@ keyrail run -- supabase db push
 keyrail ui
 ```
 
+## 私有仓库 Bootstrap
+
+如果私有仓库还没有 clone 到本地，这时 repo 里还没有 `.agent-context.yaml`，Agent 也就无法从项目配置里判断应该用哪个 GitHub PAT。先配置一个用户级 GitHub bootstrap profile：
+
+```bash
+keyrail profile set github personal-github --value-stdin
+keyrail clone github owner/private-repo
+cd private-repo
+keyrail init --repo git@github.com:owner/private-repo.git
+keyrail link github personal-github
+keyrail current --json
+```
+
+把 PAT 通过 stdin 输入，或者从你自己的安全来源 pipe 进来。`keyrail clone` 使用临时 Git askpass helper，不会把 token 写进 Git remote URL。
+
+仓库已经在本地之后，Agent 使用普通项目流程：
+
+```bash
+keyrail current --json
+keyrail run -- gh repo view
+```
+
 ## Agent 集成
 
 建议让 Agent 每次进入工程后先执行：

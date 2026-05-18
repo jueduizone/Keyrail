@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { getStateForUi, renderUiHtml } from "../packages/cli/src/cli.js";
+import { getStateForUi, normalizeGithubRepoUrl, renderUiHtml } from "../packages/cli/src/cli.js";
 
 const CLI = path.resolve("packages/cli/bin/keyrail.js");
 
@@ -35,12 +35,12 @@ test("run redacts injected secrets from child output", async () => {
     manifest.replace("secrets: {}", "secrets:\n      openai: demo-openai").replace("allow:\n    - gh issue list", "allow:\n    - node -e")
   );
   await mkdir(path.join(cwd, ".keyrail"), { recursive: true });
-  await writeFile(path.join(cwd, ".keyrail", "secrets.local.json"), JSON.stringify({ "demo-openai": "sk-test-secret" }));
+  await writeFile(path.join(cwd, ".keyrail", "secrets.local.json"), JSON.stringify({ "demo-openai": "DUMMY_OPENAI_TOKEN_FOR_TESTS" }));
 
   const result = run(["run", "--", "node", "-e", "console.log(process.env.OPENAI_API_KEY)"], cwd);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\[REDACTED\]/);
-  assert.doesNotMatch(result.stdout, /sk-test-secret/);
+  assert.doesNotMatch(result.stdout, /DUMMY_OPENAI_TOKEN_FOR_TESTS/);
 });
 
 test("ui renders current project state", async () => {
@@ -109,6 +109,60 @@ test("link and unlink provide the simple service routing workflow", async () => 
   assert.deepEqual(after.services, []);
 });
 
+test("profile commands use a user-level config root for private repo bootstrap", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-profile-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-home-"));
+
+  const set = run(["profile", "set", "github", "personal-github", "--value", "DUMMY_GITHUB_TOKEN_FOR_TESTS"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(set.status, 0, set.stderr);
+  assert.doesNotMatch(set.stdout, /DUMMY_GITHUB_TOKEN_FOR_TESTS/);
+
+  const profile = JSON.parse(await readFile(path.join(keyrailHome, "profiles.json"), "utf8"));
+  assert.equal(profile.services.github.reference, "personal-github");
+
+  const secrets = JSON.parse(await readFile(path.join(keyrailHome, "secrets.global.json"), "utf8"));
+  assert.equal(secrets["personal-github"], "DUMMY_GITHUB_TOKEN_FOR_TESTS");
+
+  const list = run(["profile", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(list.status, 0, list.stderr);
+  assert.equal(JSON.parse(list.stdout).services.github.reference, "personal-github");
+
+  const unset = run(["profile", "unset", "github", "--delete-value"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(unset.status, 0, unset.stderr);
+  const after = JSON.parse(await readFile(path.join(keyrailHome, "secrets.global.json"), "utf8"));
+  assert.equal(after["personal-github"], undefined);
+});
+
+test("profile set accepts secret values from stdin", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-profile-stdin-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-stdin-home-"));
+
+  const set = run(["profile", "set", "github", "stdin-github", "--value-stdin"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }, "DUMMY_STDIN_GITHUB_TOKEN\n");
+  assert.equal(set.status, 0, set.stderr);
+
+  const secrets = JSON.parse(await readFile(path.join(keyrailHome, "secrets.global.json"), "utf8"));
+  assert.equal(secrets["stdin-github"], "DUMMY_STDIN_GITHUB_TOKEN");
+});
+
+test("github clone urls normalize without embedding tokens", () => {
+  assert.equal(normalizeGithubRepoUrl("acme/private-repo"), "https://github.com/acme/private-repo.git");
+  assert.equal(normalizeGithubRepoUrl("acme/private-repo.git"), "https://github.com/acme/private-repo.git");
+  assert.equal(normalizeGithubRepoUrl("git@github.com:acme/private-repo.git"), "git@github.com:acme/private-repo.git");
+  assert.equal(normalizeGithubRepoUrl("https://github.com/acme/private-repo.git"), "https://github.com/acme/private-repo.git");
+});
+
+test("agent skill documents current state and private repo bootstrap", async () => {
+  const skill = await readFile(path.resolve("agents/keyrail/SKILL.md"), "utf8");
+  await stat(path.resolve("docs/agent/README.md"));
+  assert.match(skill, /keyrail current --json/);
+  assert.match(skill, /keyrail clone github/);
+  assert.match(skill, /Never read, print, or copy raw secret values/);
+});
+
 test("policy and audit commands expose configured rules and run decisions", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-audit-"));
   run(["init", "--id", "demo", "--repo", "local"], cwd);
@@ -124,9 +178,11 @@ test("policy and audit commands expose configured rules and run decisions", asyn
   assert.equal(entries.at(-1).command, "node -e console.log('ok')");
 });
 
-function run(args, cwd) {
+function run(args, cwd, env = {}, input = undefined) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd,
-    encoding: "utf8"
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    input
   });
 }

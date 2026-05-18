@@ -113,6 +113,28 @@ Open the local UI:
 keyrail ui
 ```
 
+## Private Repo Bootstrap
+
+If the private repository is not cloned yet, there is no project manifest for the agent to read. Use a user-level GitHub bootstrap profile first:
+
+```bash
+keyrail profile set github personal-github --value-stdin
+keyrail clone github owner/private-repo
+cd private-repo
+keyrail init --repo git@github.com:owner/private-repo.git
+keyrail link github personal-github
+keyrail current --json
+```
+
+Paste the PAT into stdin when prompted by your shell or pipe it from your own secure source. `keyrail clone` uses a temporary Git askpass helper, so the token is not written into the Git remote URL.
+
+After the repository exists locally, agents should use the normal project flow:
+
+```bash
+keyrail current --json
+keyrail run -- gh repo view
+```
+
 ## Agent Integration
 
 Tell agents to start with:

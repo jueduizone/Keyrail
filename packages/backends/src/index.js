@@ -1,7 +1,13 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 const SECRET_FILE = ".keyrail/secrets.local.json";
+const GLOBAL_SECRET_FILE = "secrets.global.json";
+
+export function getKeyrailConfigRoot() {
+  return process.env.KEYRAIL_HOME ?? path.join(os.homedir(), ".keyrail");
+}
 
 export function createSecretBackend(options = {}) {
   const type = options.type ?? "local-file";
@@ -104,6 +110,40 @@ export class EnvSecretBackend {
     }
 
     return { env, resolved, missing };
+  }
+}
+
+export class GlobalSecretStore {
+  constructor(configRoot = getKeyrailConfigRoot()) {
+    this.path = path.join(configRoot, GLOBAL_SECRET_FILE);
+  }
+
+  async set(reference, value) {
+    const store = await this.readStore();
+    store[reference] = value;
+    await mkdir(path.dirname(this.path), { recursive: true });
+    await writeFile(this.path, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  async get(reference) {
+    const store = await this.readStore();
+    return store[reference] ?? null;
+  }
+
+  async unset(reference) {
+    const store = await this.readStore();
+    delete store[reference];
+    await mkdir(path.dirname(this.path), { recursive: true });
+    await writeFile(this.path, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  async readStore() {
+    try {
+      return JSON.parse(await readFile(this.path, "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return {};
+      throw error;
+    }
   }
 }
 

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
+import os from "node:os";
 import path from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { createSecretBackend, redactSecrets } from "@keyrail/backends";
+import { GlobalSecretStore, createSecretBackend, getKeyrailConfigRoot, redactSecrets } from "@keyrail/backends";
 import {
   KeyrailError,
   MANIFEST_FILE,
@@ -46,6 +47,10 @@ export async function main(argv) {
       return unlinkCommand(args, flags);
     case "projects":
       return projectsCommand(args, flags);
+    case "profile":
+      return profileCommand(args, flags);
+    case "clone":
+      return cloneCommand(args, flags);
     case "secrets":
       return secretsCommand(args, flags);
     case "context":
@@ -319,6 +324,75 @@ async function projectsCommand(args, flags) {
   console.log(`Root: ${payload.root}`);
   console.log(`Context: ${payload.context}`);
   printServiceLinks(payload.services);
+}
+
+async function profileCommand(args, flags) {
+  const subcommand = args[0] ?? "list";
+  const profilePath = getProfilePath();
+
+  if (subcommand === "list") {
+    const profile = await readProfile();
+    if (flags.json) return printJson(profile);
+    if (!Object.keys(profile.services).length) {
+      console.log("Profiles: none");
+      return;
+    }
+    console.log("Profiles:");
+    for (const [service, entry] of Object.entries(profile.services)) {
+      console.log(`- ${service}: ${entry.reference}`);
+    }
+    return;
+  }
+
+  if (subcommand === "set") {
+    const service = args[1] ?? flags.service;
+    const reference = args[2] ?? flags.reference;
+    const value = flags.value ?? (flags.valueStdin ? await readStdin() : null);
+    if (!service || !reference) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail profile set <service> <reference> [--value <secret>|--value-stdin]");
+    const profile = await readProfile();
+    profile.services[service] = { reference };
+    await writeProfile(profilePath, profile);
+    if (value) await new GlobalSecretStore().set(reference, value);
+    console.log(`Saved ${service} profile ${reference}`);
+    return;
+  }
+
+  if (subcommand === "unset") {
+    const service = args[1] ?? flags.service;
+    if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail profile unset <service>");
+    const profile = await readProfile();
+    const reference = profile.services[service]?.reference;
+    delete profile.services[service];
+    await writeProfile(profilePath, profile);
+    if (flags.deleteValue && reference) await new GlobalSecretStore().unset(reference);
+    console.log(`Removed ${service} profile`);
+    return;
+  }
+
+  throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail profile list|set|unset");
+}
+
+async function cloneCommand(args, flags) {
+  const service = args[0];
+  if (service !== "github") throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail clone github <owner/repo> [directory]");
+  const repo = args[1] ?? flags.repo;
+  const target = args[2] ?? flags.directory;
+  if (!repo) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail clone github <owner/repo> [directory]");
+
+  const profile = await readProfile();
+  const reference = flags.reference ?? profile.services.github?.reference;
+  if (!reference) {
+    throw new KeyrailError("PROFILE_NOT_FOUND", "No GitHub profile configured. Run keyrail profile set github <reference> --value-stdin");
+  }
+
+  const token = await new GlobalSecretStore().get(reference);
+  if (!token) {
+    throw new KeyrailError("SECRET_NOT_FOUND", `No value found for ${reference}. Run keyrail profile set github ${reference} --value-stdin`);
+  }
+
+  const url = normalizeGithubRepoUrl(repo);
+  const exitCode = await gitCloneWithToken(url, target, token);
+  process.exitCode = exitCode;
 }
 
 async function secretsCommand(args, flags) {
@@ -666,6 +740,8 @@ Usage:
   keyrail init [--id <id>] [--name <name>] [--repo <url|local>] [--context <name>]
   keyrail link <service> <reference> [--value <secret>]
   keyrail unlink <service>
+  keyrail profile set github <reference> [--value-stdin]
+  keyrail clone github <owner/repo> [directory]
   keyrail current [--json] [--context <name>]
   keyrail run [--context <name>] [--yes] -- <command>
   keyrail ui [--port <port>] [--token <token>]
@@ -675,6 +751,7 @@ Advanced:
   keyrail identify [--json]
   keyrail doctor [--json] [--context <name>]
   keyrail projects [--json]
+  keyrail profile list|set|unset
   keyrail context list|use|add|remove
   keyrail policy show|allow|deny|require-confirm
   keyrail handoff [--json] [--context <name>]
@@ -687,6 +764,60 @@ function titleize(value) {
   return value
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function getProfilePath() {
+  return path.join(getKeyrailConfigRoot(), "profiles.json");
+}
+
+async function readProfile() {
+  try {
+    const raw = await readFile(getProfilePath(), "utf8");
+    const profile = JSON.parse(raw);
+    return { version: 1, services: {}, ...profile, services: profile.services ?? {} };
+  } catch (error) {
+    if (error.code === "ENOENT") return { version: 1, services: {} };
+    throw error;
+  }
+}
+
+async function writeProfile(profilePath, profile) {
+  await mkdir(path.dirname(profilePath), { recursive: true });
+  await writeFile(profilePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
+}
+
+export function normalizeGithubRepoUrl(repo) {
+  if (repo.startsWith("https://") || repo.startsWith("git@")) return repo;
+  return `https://github.com/${repo.replace(/\.git$/, "")}.git`;
+}
+
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks.map((chunk) => (typeof chunk === "string" ? Buffer.from(chunk) : chunk))).toString("utf8").trim();
+}
+
+async function gitCloneWithToken(url, target, token) {
+  const tempDir = await import("node:fs/promises").then((fs) => fs.mkdtemp(path.join(os.tmpdir(), "keyrail-git-")));
+  const askpassPath = path.join(tempDir, "askpass.sh");
+  await writeFile(
+    askpassPath,
+    `#!/bin/sh\ncase "$1" in\n*Username*) printf '%s\\n' x-access-token ;;\n*) printf '%s\\n' "$KEYRAIL_GITHUB_TOKEN" ;;\nesac\n`,
+    { mode: 0o700 }
+  );
+
+  const args = ["clone", url];
+  if (target) args.push(target);
+  try {
+    return await spawnRedacted(["git", ...args], {
+      ...process.env,
+      GIT_ASKPASS: askpassPath,
+      GIT_TERMINAL_PROMPT: "0",
+      KEYRAIL_GITHUB_TOKEN: token
+    }, [token]);
+  } finally {
+    await import("node:fs/promises").then((fs) => fs.rm(tempDir, { recursive: true, force: true }));
+  }
 }
 
 export async function getStateForUi(root = process.cwd(), requestedContext = null) {

@@ -36,7 +36,21 @@ keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
 
 For local testing, `repo: local` is fine.
 
-## 2. Link Service Keys
+## 2. Optional: Clone a Private Repo First
+
+If the private repo is not on disk yet, project-level Keyrail config cannot help because the project does not exist locally. Configure a user-level GitHub bootstrap profile, then clone through Keyrail:
+
+```bash
+keyrail profile set github personal-github --value-stdin
+keyrail clone github acme/private-repo
+cd private-repo
+keyrail init --repo git@github.com:acme/private-repo.git
+keyrail link github personal-github
+```
+
+Use `--value-stdin` so the PAT is not part of shell history. The Git remote remains a normal GitHub URL without the token.
+
+## 3. Link Service Keys
 
 Link the services this project uses:
 
@@ -57,7 +71,7 @@ keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
 
 Local values are written to `.keyrail/secrets.local.json`, which should stay out of git.
 
-## 3. Check What the Agent Sees
+## 4. Check What the Agent Sees
 
 ```bash
 keyrail current --json
@@ -73,7 +87,7 @@ The output tells the agent:
 
 This is the main agent-friendly integration point.
 
-## 4. Run Commands Through Keyrail
+## 5. Run Commands Through Keyrail
 
 ```bash
 keyrail run -- gh issue list
@@ -83,7 +97,7 @@ keyrail run -- supabase db push
 
 Keyrail verifies the project, resolves linked keys, injects them into the child process, redacts output, and writes an audit entry.
 
-## 5. Use the Local UI
+## 6. Use the Local UI
 
 ```bash
 keyrail ui
@@ -100,7 +114,7 @@ Open the printed URL. The UI shows:
 
 This is the easiest path for non-technical users.
 
-## 6. Common Patterns
+## 7. Common Patterns
 
 Use environment variables instead of local file storage:
 
@@ -122,7 +136,7 @@ List linked services:
 keyrail current
 ```
 
-## 7. Advanced: Staging and Production
+## 8. Advanced: Staging and Production
 
 If a project needs multiple environments:
 
@@ -145,7 +159,7 @@ High-risk contexts require confirmation unless you explicitly pass:
 KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
 ```
 
-## 8. Advanced: Policy and Audit
+## 9. Advanced: Policy and Audit
 
 Allow expected commands:
 
@@ -167,7 +181,7 @@ keyrail audit list
 keyrail audit list --json
 ```
 
-## 9. Handoff to Another Agent
+## 10. Handoff to Another Agent
 
 ```bash
 keyrail handoff --json

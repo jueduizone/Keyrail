@@ -36,7 +36,21 @@ keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
 
 本地测试时使用 `repo: local` 就可以。
 
-## 2. 绑定服务 Key
+## 2. 可选：先 clone 私有仓库
+
+如果私有仓库还没有在本地，项目级 Keyrail 配置还不存在，所以不能靠 repo 内 manifest 判断应该用哪个 PAT。先配置用户级 GitHub bootstrap profile，再通过 Keyrail clone：
+
+```bash
+keyrail profile set github personal-github --value-stdin
+keyrail clone github acme/private-repo
+cd private-repo
+keyrail init --repo git@github.com:acme/private-repo.git
+keyrail link github personal-github
+```
+
+建议用 `--value-stdin`，避免 PAT 留在 shell history。Git remote 会保持普通 GitHub URL，不包含 token。
+
+## 3. 绑定服务 Key
 
 绑定这个工程会用到的服务：
 
@@ -57,7 +71,7 @@ keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
 
 本地值会写入 `.keyrail/secrets.local.json`，这个文件不应该进 git。
 
-## 3. 查看 Agent 能看到什么
+## 4. 查看 Agent 能看到什么
 
 ```bash
 keyrail current --json
@@ -73,7 +87,7 @@ keyrail current --json
 
 这是最主要的 Agent 集成入口。
 
-## 4. 通过 Keyrail 执行命令
+## 5. 通过 Keyrail 执行命令
 
 ```bash
 keyrail run -- gh issue list
@@ -83,7 +97,7 @@ keyrail run -- supabase db push
 
 Keyrail 会校验项目身份、解析绑定的 key、注入子进程、脱敏输出，并写入 audit。
 
-## 5. 使用本地 UI
+## 6. 使用本地 UI
 
 ```bash
 keyrail ui
@@ -100,7 +114,7 @@ keyrail ui
 
 这是小白用户最容易理解的入口。
 
-## 6. 常见用法
+## 7. 常见用法
 
 使用环境变量，不保存本地文件：
 
@@ -122,7 +136,7 @@ keyrail unlink vercel
 keyrail current
 ```
 
-## 7. 高级：Staging 和 Production
+## 8. 高级：Staging 和 Production
 
 如果项目需要多个环境：
 
@@ -145,7 +159,7 @@ high-risk context 默认需要确认。自动化场景可以显式传入：
 KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
 ```
 
-## 8. 高级：Policy 和 Audit
+## 9. 高级：Policy 和 Audit
 
 允许常用命令：
 
@@ -167,7 +181,7 @@ keyrail audit list
 keyrail audit list --json
 ```
 
-## 9. Handoff 给另一个 Agent
+## 10. Handoff 给另一个 Agent
 
 ```bash
 keyrail handoff --json
