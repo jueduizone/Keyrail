@@ -26,6 +26,7 @@ export class LocalFileSecretBackend {
     return Object.entries(references ?? {}).map(([provider, reference]) => ({
       provider,
       reference,
+      envName: envNameForProvider(provider),
       configured: Object.prototype.hasOwnProperty.call(store, reference)
     }));
   }
@@ -58,6 +59,13 @@ export class LocalFileSecretBackend {
     await writeFile(this.path, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
   }
 
+  async unset(reference) {
+    const store = await this.readStore();
+    delete store[reference];
+    await mkdir(path.dirname(this.path), { recursive: true });
+    await writeFile(this.path, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  }
+
   async readStore() {
     try {
       return JSON.parse(await readFile(this.path, "utf8"));
@@ -73,6 +81,7 @@ export class EnvSecretBackend {
     return Object.entries(references ?? {}).map(([provider, reference]) => ({
       provider,
       reference,
+      envName: envNameForProvider(provider),
       configured: Boolean(process.env[envNameForProvider(provider)])
     }));
   }

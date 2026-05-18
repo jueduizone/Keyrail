@@ -1,6 +1,17 @@
 {
   "name": "@keyrail/backends",
   "version": "0.1.0",
+  "description": "Pluggable secret backends for Keyrail.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jueduizone/Keyrail.git",
+    "directory": "packages/backends"
+  },
+  "files": [
+    "src",
+    "package.json"
+  ],
   "exports": "./src/index.js"
 }

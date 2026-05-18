@@ -8,7 +8,12 @@ export {
   loadManifest,
   normalizeManifest,
   readContextLock,
+  removeContext,
+  removeSecretReference,
   resolveActiveContextName,
+  setSecretReference,
+  upsertContext,
+  validateManifest,
   writeContextLock,
   writeManifest
 } from "./manifest.js";

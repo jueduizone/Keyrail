@@ -1,6 +1,17 @@
 {
   "name": "@keyrail/core",
   "version": "0.1.0",
+  "description": "Core project identity and manifest utilities for Keyrail.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jueduizone/Keyrail.git",
+    "directory": "packages/core"
+  },
+  "files": [
+    "src",
+    "package.json"
+  ],
   "exports": "./src/index.js"
 }

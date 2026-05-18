@@ -1,6 +1,17 @@
 {
   "name": "@keyrail/policy",
   "version": "0.1.0",
+  "description": "Command policy evaluation for Keyrail.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jueduizone/Keyrail.git",
+    "directory": "packages/policy"
+  },
+  "files": [
+    "src",
+    "package.json"
+  ],
   "exports": "./src/index.js"
 }

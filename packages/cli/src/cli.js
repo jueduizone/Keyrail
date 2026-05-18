@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import path from "node:path";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createSecretBackend, redactSecrets } from "@keyrail/backends";
 import {
   KeyrailError,
@@ -8,7 +10,12 @@ import {
   getContext,
   identifyProject,
   loadManifest,
+  removeContext,
+  removeSecretReference,
   resolveActiveContextName,
+  setSecretReference,
+  upsertContext,
+  validateManifest,
   writeContextLock,
   verifyIdentity,
   writeManifest
@@ -35,6 +42,12 @@ export async function main(argv) {
       return handoffCommand(flags);
     case "secrets":
       return secretsCommand(args, flags);
+    case "context":
+      return contextCommand(args, flags);
+    case "policy":
+      return policyCommand(args, flags);
+    case "audit":
+      return auditCommand(args, flags);
     case "ui":
     case "serve":
       return serveCommand(flags);
@@ -154,7 +167,7 @@ async function doctorCommand(flags) {
 async function runCommand(args, flags, passthrough) {
   const command = passthrough.length > 0 ? passthrough : args;
   const state = await getVerifiedState(flags.context);
-  const confirmed = flags.yes || process.env.KEYRAIL_CONFIRM === "1";
+  const confirmed = await resolveConfirmation(flags, state);
   const decision = evaluatePolicy({
     command,
     context: state.context,
@@ -163,6 +176,16 @@ async function runCommand(args, flags, passthrough) {
   });
 
   if (!decision.allowed) {
+    await appendAudit(state.root, {
+      at: new Date().toISOString(),
+      project: state.manifest.project.id,
+      context: state.context.name,
+      command: normalizeCommand(command),
+      decision: decision.requiresConfirmation ? "confirmation_required" : "denied",
+      reason: decision.reason,
+      injected: [],
+      missing: []
+    });
     throw new KeyrailError(decision.requiresConfirmation ? "CONFIRMATION_REQUIRED" : "POLICY_DENIED", decision.reason);
   }
 
@@ -175,6 +198,7 @@ async function runCommand(args, flags, passthrough) {
     project: state.manifest.project.id,
     context: state.context.name,
     command: normalizeCommand(command),
+    decision: "allowed",
     injected: secrets.resolved.map(({ provider, reference, envName }) => ({ provider, reference, envName })),
     missing: secrets.missing
   };
@@ -220,20 +244,148 @@ async function handoffCommand(flags) {
 }
 
 async function secretsCommand(args, flags) {
-  if (args[0] !== "list") {
-    throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail secrets list");
-  }
+  const subcommand = args[0] ?? "list";
   const state = await getVerifiedState(flags.context);
   const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
-  const secrets = await secretBackend.listReferences(state.context.secrets);
-  if (flags.json) return printJson(secrets);
-  printSecretReferences(secrets);
+
+  if (subcommand === "list") {
+    const secrets = await secretBackend.listReferences(state.context.secrets);
+    if (flags.json) return printJson(secrets);
+    printSecretReferences(secrets);
+    return;
+  }
+
+  if (subcommand === "set") {
+    const provider = args[1] ?? flags.provider;
+    const reference = args[2] ?? flags.reference;
+    const value = flags.value ?? args[3];
+    if (!provider || !reference) {
+      throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail secrets set <provider> <reference> [--value <value>]");
+    }
+    const loaded = await loadManifest(process.cwd());
+    const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+    setSecretReference(loaded.manifest, contextName, provider, reference);
+    await writeManifest(loaded.root, loaded.manifest);
+    if (value) await secretBackend.set(reference, value);
+    console.log(`Set ${provider} reference in ${contextName}`);
+    return;
+  }
+
+  if (subcommand === "unset") {
+    const provider = args[1] ?? flags.provider;
+    if (!provider) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail secrets unset <provider>");
+    const loaded = await loadManifest(process.cwd());
+    const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+    const reference = getContext(loaded.manifest, contextName).secrets[provider];
+    removeSecretReference(loaded.manifest, contextName, provider);
+    await writeManifest(loaded.root, loaded.manifest);
+    if (flags.deleteValue && reference && typeof secretBackend.unset === "function") await secretBackend.unset(reference);
+    console.log(`Removed ${provider} reference from ${contextName}`);
+    return;
+  }
+
+  throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail secrets list|set|unset");
+}
+
+async function contextCommand(args, flags) {
+  const subcommand = args[0] ?? "list";
+  const loaded = await loadManifest(process.cwd());
+
+  if (subcommand === "list") {
+    const active = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+    const contexts = Object.values(loaded.manifest.contexts).map((context) => ({
+      name: context.name,
+      risk: context.risk,
+      requireConfirmation: context.requireConfirmation,
+      active: context.name === active
+    }));
+    if (flags.json) return printJson(contexts);
+    for (const context of contexts) {
+      console.log(`${context.active ? "*" : " "} ${context.name} (${context.risk})${context.requireConfirmation ? " confirm" : ""}`);
+    }
+    return;
+  }
+
+  if (subcommand === "use") {
+    const name = args[1] ?? flags.context;
+    getContext(loaded.manifest, name);
+    await writeContextLock(loaded.root, { project: loaded.manifest.project.id, context: name });
+    console.log(`Using context ${name}`);
+    return;
+  }
+
+  if (subcommand === "add") {
+    const name = args[1] ?? flags.name;
+    upsertContext(loaded.manifest, name, {
+      risk: flags.risk ?? "low",
+      requireConfirmation: Boolean(flags.requireConfirmation ?? flags.confirm)
+    });
+    await writeManifest(loaded.root, loaded.manifest);
+    console.log(`Added context ${name}`);
+    return;
+  }
+
+  if (subcommand === "remove") {
+    const name = args[1] ?? flags.name;
+    removeContext(loaded.manifest, name);
+    await writeManifest(loaded.root, loaded.manifest);
+    console.log(`Removed context ${name}`);
+    return;
+  }
+
+  throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail context list|use|add|remove");
+}
+
+async function policyCommand(args, flags) {
+  const subcommand = args[0] ?? "show";
+  const loaded = await loadManifest(process.cwd());
+
+  if (subcommand === "show") {
+    if (flags.json) return printJson(loaded.manifest.policy);
+    console.log("Allow:");
+    for (const item of loaded.manifest.policy.allow) console.log(`- ${item}`);
+    console.log("Require confirm:");
+    for (const item of loaded.manifest.policy.requireConfirm) console.log(`- ${item}`);
+    console.log("Deny:");
+    for (const item of loaded.manifest.policy.deny) console.log(`- ${item}`);
+    return;
+  }
+
+  const listName = {
+    "allow": "allow",
+    "deny": "deny",
+    "require-confirm": "requireConfirm"
+  }[subcommand];
+  if (!listName) throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail policy show|allow|deny|require-confirm <command>");
+
+  const command = args.slice(1).join(" ") || flags.command;
+  if (!command) throw new KeyrailError("INVALID_ARGUMENTS", `Use keyrail policy ${subcommand} <command>`);
+  if (!loaded.manifest.policy[listName].includes(command)) loaded.manifest.policy[listName].push(command);
+  validateManifest(loaded.manifest);
+  await writeManifest(loaded.root, loaded.manifest);
+  console.log(`Added policy ${subcommand}: ${command}`);
+}
+
+async function auditCommand(args, flags) {
+  const subcommand = args[0] ?? "list";
+  if (subcommand !== "list") throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail audit list");
+  const loaded = await loadManifest(process.cwd());
+  const audit = await readAuditLog(loaded.root, Number(flags.limit ?? 50));
+  if (flags.json) return printJson(audit);
+  if (!audit.length) {
+    console.log("Audit: none");
+    return;
+  }
+  for (const entry of audit) {
+    console.log(`${entry.at} ${entry.project}/${entry.context} ${entry.decision ?? "allowed"} ${entry.command}`);
+  }
 }
 
 async function serveCommand(flags) {
   const { createServer } = await import("node:http");
   const port = Number(flags.port ?? 7788);
   const host = flags.host ?? "127.0.0.1";
+  const token = flags.token ?? process.env.KEYRAIL_UI_TOKEN ?? randomBytes(18).toString("base64url");
 
   const server = createServer(async (req, res) => {
     try {
@@ -241,8 +393,14 @@ async function serveCommand(flags) {
       const route = `${req.method} ${url.pathname}`;
 
       if (route === "GET /") {
-        const html = await renderUiHtml(process.cwd());
+        if (!isUiRequestAuthorized(req, url, token)) return sendUnauthorized(res);
+        const html = await renderUiHtml(process.cwd(), token);
         send(res, 200, "text/html; charset=utf-8", html);
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/") && !isUiRequestAuthorized(req, url, token)) {
+        sendUnauthorized(res);
         return;
       }
 
@@ -306,7 +464,7 @@ async function serveCommand(flags) {
     });
   });
 
-  console.log(`Keyrail UI running at http://${host}:${port}`);
+  console.log(`Keyrail UI running at http://${host}:${port}/?token=${token}`);
 }
 
 async function getVerifiedState(contextName) {
@@ -393,6 +551,24 @@ function printJson(value) {
   console.log(JSON.stringify(value, null, 2));
 }
 
+async function resolveConfirmation(flags, state) {
+  if (flags.yes || process.env.KEYRAIL_CONFIRM === "1") return true;
+  const context = state.context;
+  const needsPrompt = context.risk === "high" || context.requireConfirmation;
+  if (!needsPrompt) return false;
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const expected = `${state.manifest.project.id}/${context.name}`;
+    const answer = await rl.question(`Type ${expected} to confirm high-risk execution: `);
+    return answer.trim() === expected;
+  } finally {
+    rl.close();
+  }
+}
+
 function printHelp() {
   console.log(`Keyrail
 
@@ -403,9 +579,12 @@ Usage:
   keyrail identify [--json]
   keyrail doctor [--json] [--context <name>]
   keyrail run [--context <name>] [--yes] -- <command>
+  keyrail context list|use|add|remove
+  keyrail policy show|allow|deny|require-confirm
   keyrail handoff [--json] [--context <name>]
-  keyrail secrets list [--json] [--context <name>]
-  keyrail ui [--port <port>]
+  keyrail secrets list|set|unset [--context <name>]
+  keyrail audit list [--json]
+  keyrail ui [--port <port>] [--token <token>]
 `);
 }
 
@@ -438,17 +617,17 @@ export async function getStateForUi(root = process.cwd(), requestedContext = nul
   };
 }
 
-async function readAuditLog(root) {
+async function readAuditLog(root, limit = 50) {
   const auditPath = path.join(root, ".keyrail", "audit.log");
   try {
     const raw = await readFile(auditPath, "utf8");
-    return raw.trim().split("\n").filter(Boolean).slice(-50).map((line) => JSON.parse(line));
+    return raw.trim().split("\n").filter(Boolean).slice(-limit).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
 }
 
-export async function renderUiHtml(root = process.cwd()) {
+export async function renderUiHtml(root = process.cwd(), token = "") {
   const state = await getStateForUi(root);
   return `<!doctype html>
 <html lang="zh">
@@ -538,13 +717,18 @@ export async function renderUiHtml(root = process.cwd()) {
 
     async function saveManifest() {
       const manifest = window.__manifestDraft || {};
-      await fetch('/api/manifest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(manifest) });
+      await apiFetch('/api/manifest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(manifest) });
       location.reload();
     }
 
     async function switchContext(name) {
-      await fetch('/api/context', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ context: name }) });
+      await apiFetch('/api/context', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ context: name }) });
       location.reload();
+    }
+
+    function apiFetch(path, options = {}) {
+      const headers = Object.assign({}, options.headers || {}, { 'x-keyrail-token': ${JSON.stringify(token)} });
+      return fetch(path, Object.assign({}, options, { headers }));
     }
 
     function render() {
@@ -592,6 +776,19 @@ function stringifyManifestForEditor(state) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>\"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+}
+
+function isUiRequestAuthorized(req, url, token) {
+  if (!token) return true;
+  const provided = req.headers["x-keyrail-token"] ?? url.searchParams.get("token");
+  if (typeof provided !== "string") return false;
+  const expectedBuffer = Buffer.from(token);
+  const providedBuffer = Buffer.from(provided);
+  return expectedBuffer.length === providedBuffer.length && timingSafeEqual(expectedBuffer, providedBuffer);
+}
+
+function sendUnauthorized(res) {
+  send(res, 401, "application/json; charset=utf-8", JSON.stringify({ error: "unauthorized" }));
 }
 
 function send(res, statusCode, contentType, body) {

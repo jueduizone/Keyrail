@@ -1,9 +1,29 @@
 {
   "name": "@keyrail/cli",
   "version": "0.1.0",
+  "description": "Agent-aware project identity and credential routing CLI.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jueduizone/Keyrail.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/jueduizone/Keyrail#readme",
+  "bugs": {
+    "url": "https://github.com/jueduizone/Keyrail/issues"
+  },
+  "files": [
+    "bin",
+    "src",
+    "package.json",
+    "README.md"
+  ],
   "bin": {
     "keyrail": "bin/keyrail.js"
+  },
+  "exports": {
+    ".": "./src/cli.js"
   },
   "dependencies": {
     "@keyrail/backends": "0.1.0",

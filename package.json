@@ -12,6 +12,8 @@
   },
   "scripts": {
     "test": "node --test",
+    "check": "node --check packages/cli/src/cli.js && node --test",
+    "pack:dry-run": "npm pack --dry-run --workspace @keyrail/cli",
     "keyrail": "node packages/cli/bin/keyrail.js"
   },
   "engines": {

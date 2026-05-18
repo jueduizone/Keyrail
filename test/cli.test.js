@@ -63,6 +63,41 @@ test("ui renders current project state", async () => {
   assert.match(html, /manifest-editor/);
 });
 
+test("context and secret management commands update the manifest", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-manage-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const addContext = run(["context", "add", "staging", "--risk", "medium"], cwd);
+  assert.equal(addContext.status, 0, addContext.stderr);
+
+  const useContext = run(["context", "use", "staging"], cwd);
+  assert.equal(useContext.status, 0, useContext.stderr);
+
+  const setSecret = run(["secrets", "set", "openai", "demo-openai"], cwd);
+  assert.equal(setSecret.status, 0, setSecret.stderr);
+
+  const current = run(["current", "--json"], cwd);
+  assert.equal(current.status, 0, current.stderr);
+  const payload = JSON.parse(current.stdout);
+  assert.equal(payload.context.name, "staging");
+  assert.deepEqual(payload.context.secrets, { openai: "demo-openai" });
+});
+
+test("policy and audit commands expose configured rules and run decisions", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-audit-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["policy", "allow", "node -e"], cwd).status, 0);
+
+  const result = run(["run", "--", "node", "-e", "console.log('ok')"], cwd);
+  assert.equal(result.status, 0, result.stderr);
+
+  const audit = run(["audit", "list", "--json"], cwd);
+  assert.equal(audit.status, 0, audit.stderr);
+  const entries = JSON.parse(audit.stdout);
+  assert.equal(entries.at(-1).decision, "allowed");
+  assert.equal(entries.at(-1).command, "node -e console.log('ok')");
+});
+
 function run(args, cwd) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd,

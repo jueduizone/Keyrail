@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseYaml, stringifyYaml } from "@keyrail/core";
+import { KeyrailError, parseYaml, stringifyYaml, validateManifest } from "@keyrail/core";
 
 test("parses Keyrail manifest YAML subset", () => {
   const parsed = parseYaml(`
@@ -37,4 +37,16 @@ test("stringifies nested objects and lists", () => {
 
   assert.match(yaml, /policy:/);
   assert.match(yaml, /allow:\n    - gh issue list/);
+});
+
+test("validates manifest default context and risk", () => {
+  assert.throws(
+    () =>
+      validateManifest({
+        project: { id: "demo", name: "Demo", repo: "local", defaultContext: "prod" },
+        contexts: { local: { name: "local", risk: "low", secrets: {}, requireConfirmation: false } },
+        policy: { allow: [], requireConfirm: [], deny: [] }
+      }),
+    KeyrailError
+  );
 });
