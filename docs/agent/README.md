@@ -27,6 +27,20 @@ keyrail run -- <command>
 
 for service commands.
 
+If `status --json` shows that a needed service is missing, agents should check saved accounts:
+
+```bash
+keyrail auth list --json
+```
+
+If the right account exists, attach it with user confirmation:
+
+```bash
+keyrail attach <service> <name>
+```
+
+If no account exists, ask the user to add one with `--value-stdin` rather than pasting raw tokens into chat.
+
 ## Before a Private Repository Is Cloned
 
 When a repo does not exist locally yet, project-level Keyrail manifests are not available. Save a user-level GitHub account, then run the normal clone command through Keyrail:
@@ -48,7 +62,7 @@ keyrail status --json
 
 Planned tools:
 
-- `keyrail.current`
+- `keyrail.status`
 - `keyrail.list_services`
 - `keyrail.with`
 - `keyrail.run`

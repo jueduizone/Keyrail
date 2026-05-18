@@ -25,13 +25,25 @@ Use this skill whenever you are working in a local repository that may need proj
 
 3. Never read, print, or copy raw secret values.
 
-4. If a service is missing, tell the user:
+4. If a required service is missing from `status --json`, inspect saved local accounts:
+
+   ```bash
+   keyrail auth list --json
+   ```
+
+   If an appropriate account exists, ask before attaching it to the project:
 
    ```bash
    keyrail attach <service> <name>
    ```
 
-5. If a key value is not configured, tell the user to configure the named account through their chosen backend or:
+5. If no appropriate account exists or a key value is not configured, ask the user to add the account through Keyrail or their chosen backend. Prefer stdin for raw tokens:
+
+   ```bash
+   keyrail auth add <service> <name> --value-stdin
+   ```
+
+   For project-local values, the user can also run:
 
    ```bash
    keyrail attach <service> <name> --value <secret>
@@ -53,7 +65,7 @@ If the user asks you to clone a private GitHub repository and normal `git clone`
    keyrail auth list
    ```
 
-2. If no GitHub account exists, ask the user to configure one:
+2. If no GitHub account exists, ask the user to configure one. Do not ask them to paste a token into chat:
 
    ```bash
    keyrail auth add github <name> --value-stdin

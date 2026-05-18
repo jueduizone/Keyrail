@@ -226,6 +226,8 @@ test("agent skill documents current state and private repo bootstrap", async () 
   await stat(path.resolve("docs/agent/README.md"));
   assert.match(skill, /keyrail status --json/);
   assert.match(skill, /keyrail with github/);
+  assert.match(skill, /keyrail auth list --json/);
+  assert.match(skill, /Do not ask them to paste a token into chat/);
   assert.match(skill, /Never read, print, or copy raw secret values/);
 });
 
