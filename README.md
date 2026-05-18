@@ -1,90 +1,110 @@
 # Keyrail
 
-**Agent-aware project identity and credential routing for local development.**
+**Make local agents use the right keys for the right project.**
 
 [中文文档](README.zh-CN.md) · [Tutorial](docs/tutorial.md) · [中文教程](docs/tutorial.zh-CN.md)
 
-Keyrail helps developers and coding agents work across many local projects without mixing identities, accounts, or credentials. It binds a repository to an explicit project manifest, verifies the active context, resolves secret references through a pluggable backend, and runs commands through a policy gate.
+Keyrail is a local project credential router for coding agents. If you have many local projects and each project uses different GitHub, Vercel, Supabase, OpenAI, Anthropic, or Stripe keys, Keyrail gives the agent a simple rule:
 
-## Why Keyrail
+> First identify the current project. Then use only the keys linked to that project.
 
-Modern local development often spans many projects and many identities:
+It is not a full secret manager. It is the local layer that binds a repo to service credentials and injects the right values when a command runs.
 
-- one laptop, many repos
-- different GitHub, Vercel, Supabase, Stripe, OpenAI, or Anthropic credentials per project
-- coding agents that may not know which project, account, or environment they are operating in
-- production commands that should never run by accident
+## The Simple Flow
 
-Secret managers store secrets. Keyrail sits above them as the identity and routing layer: it tells the agent which project it is in, which context is active, which secret references are allowed, and which commands are safe to run.
+```bash
+cd my-project
 
-## Features
+keyrail init
+keyrail link github my-project-github-token
+keyrail link vercel my-project-vercel-token
+keyrail link supabase my-project-supabase-token
 
-- Project identity manifest: `.agent-context.yaml`
-- Active context lock: `.ctx/lock.yaml`
-- Git remote and package identity detection
-- Context-aware secret references
-- Local file and environment secret backends
-- Policy-gated command wrapper
-- High-risk context confirmation
-- Audit log without raw secrets
-- Local browser UI for switching contexts and editing the manifest
-- JSON-friendly CLI output for agents
+keyrail current --json
+keyrail run -- vercel deploy
+```
+
+For a beginner-friendly view:
+
+```bash
+keyrail ui
+```
+
+The UI shows the current project, linked services, whether each key is configured, and the command agents should use: `keyrail run -- <command>`.
+
+## Why This Exists
+
+Agents are good at coding, but local machines are messy:
+
+- one machine has many repos
+- each repo may use a different GitHub account or token
+- one project may deploy to a different Vercel team
+- Supabase, Stripe, OpenAI, and Anthropic keys differ per project
+- an agent can accidentally use the wrong credential if the environment is ambiguous
+
+Keyrail removes that ambiguity.
+
+## What Keyrail Does
+
+- Detects the current project.
+- Reads the project identity from `.agent-context.yaml`.
+- Shows linked services such as GitHub, Vercel, Supabase, OpenAI, and Stripe.
+- Resolves key references from a local backend or environment variables.
+- Injects keys only into the child process launched by `keyrail run`.
+- Redacts command output.
+- Gives agents JSON output through `current --json`.
+- Provides a local UI for non-technical users.
 
 ## Install
 
-From the repository:
+From this repository:
 
 ```bash
 npm install
 npm run keyrail -- current
 ```
 
-Package entry point:
-
-```bash
-npx @keyrail/cli current
-```
-
-When published to npm:
+After npm publishing:
 
 ```bash
 npm i -D @keyrail/cli
 npx keyrail init
 ```
 
-## Quick Start
+## Main Commands
 
-Initialize Keyrail in a repository:
+Initialize a project:
 
 ```bash
-keyrail init --id acme-web --name "Acme Web" --repo local
+keyrail init
 ```
 
-Check the current verified context:
+Link a service key reference:
 
 ```bash
-keyrail current
-keyrail doctor
+keyrail link github acme-github-token
+keyrail link vercel acme-vercel-token
+keyrail link supabase acme-supabase-token
 ```
 
-Add a staging context and switch to it:
+Optionally store a local development value:
 
 ```bash
-keyrail context add staging --risk medium
-keyrail context use staging
+keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
 ```
 
-Add a secret reference:
+Show the current project in an agent-friendly format:
 
 ```bash
-keyrail secrets set openai acme-openai-dev
+keyrail current --json
 ```
 
-Run a provider command through Keyrail:
+Run commands with the project’s linked keys:
 
 ```bash
-keyrail policy allow gh issue list
 keyrail run -- gh issue list
+keyrail run -- vercel deploy
+keyrail run -- supabase db push
 ```
 
 Open the local UI:
@@ -93,42 +113,87 @@ Open the local UI:
 keyrail ui
 ```
 
-The UI binds to `127.0.0.1` by default and prints a one-time URL with an access token.
+## Agent Integration
+
+Tell agents to start with:
+
+```bash
+keyrail current --json
+```
+
+The response includes:
+
+- project id and name
+- verified identity signals
+- active context
+- linked services
+- env var names
+- whether each key is configured
+- the instruction to use `keyrail run -- <command>`
+
+Example:
+
+```json
+{
+  "project": {
+    "id": "acme-web",
+    "name": "Acme Web"
+  },
+  "services": [
+    {
+      "service": "vercel",
+      "reference": "acme-vercel-token",
+      "envName": "VERCEL_TOKEN",
+      "configured": true
+    }
+  ],
+  "agent": {
+    "verified": true,
+    "instruction": "Use keyrail run -- <command> so this project receives only its linked service keys."
+  }
+}
+```
+
+## Local UI
+
+`keyrail ui` starts a local browser manager for users who do not want to edit YAML.
+
+It shows:
+
+- current project
+- active context
+- linked services
+- ready vs reference-only keys
+- agent command guidance
+- advanced manifest and audit views
+
+The UI binds to `127.0.0.1` and prints a tokenized URL.
 
 ## Manifest
 
-Keyrail reads `.agent-context.yaml` from the project root.
+Keyrail stores project routing in `.agent-context.yaml`.
 
 ```yaml
 project:
   id: acme-web
   name: Acme Web
-  repo: git@github.com:acme/web.git
-  default_context: staging
+  repo: local
+  default_context: local
 
 contexts:
   local:
     risk: low
     secrets:
+      github: acme-github-token
+      vercel: acme-vercel-token
+      supabase: acme-supabase-token
       openai: acme-openai-dev
-
-  staging:
-    risk: medium
-    secrets:
-      github: acme-github-limited
-      vercel: acme-vercel-staging
-
-  production:
-    risk: high
-    require_confirmation: true
-    secrets:
-      github: acme-github-release
-      vercel: acme-vercel-prod
 
 policy:
   allow:
     - gh issue list
     - vercel deploy
+    - supabase db push
   require_confirm:
     - vercel deploy --prod
   deny:
@@ -137,53 +202,27 @@ policy:
 
 The manifest stores references, not raw secret values.
 
-## Commands
+## Secret Values
+
+Keyrail currently supports:
+
+- local development file: `.keyrail/secrets.local.json`
+- environment variables such as `VERCEL_TOKEN`, `GITHUB_TOKEN`, `SUPABASE_ACCESS_TOKEN`, `OPENAI_API_KEY`
+
+Future adapters can support 1Password, Infisical, macOS Keychain, Vault, or other secret stores. They are optional adapters, not required for the core workflow.
+
+## Advanced Commands
+
+These exist for teams that need staging/production, command policy, and audit history:
 
 ```bash
-keyrail init [--id <id>] [--name <name>] [--repo <url|local>] [--context <name>]
-keyrail bind [--context <name>]
-keyrail current [--json] [--context <name>]
-keyrail identify [--json]
-keyrail doctor [--json]
-keyrail run [--context <name>] [--yes] -- <command>
 keyrail context list|use|add|remove
 keyrail policy show|allow|deny|require-confirm
-keyrail secrets list|set|unset [--context <name>]
-keyrail audit list [--json]
-keyrail handoff [--json]
-keyrail ui [--port <port>] [--token <token>]
+keyrail secrets list|set|unset
+keyrail audit list --json
+keyrail handoff --json
+keyrail doctor
 ```
-
-## Local UI
-
-`keyrail ui` starts a local manager for:
-
-- viewing project identity
-- switching active contexts
-- editing the manifest
-- reviewing secret references
-- viewing audit history
-
-It is intentionally local-first. The UI is protected by a token printed in the startup URL.
-
-## Secret Backends
-
-Keyrail does not force a specific vault. The current release includes:
-
-- `local-file`: `.keyrail/secrets.local.json`
-- `env`: process environment variables such as `OPENAI_API_KEY`
-
-Future adapters can be added for 1Password, Infisical, macOS Keychain, Vault, or other systems without changing the manifest model.
-
-## Security Model
-
-- Raw secret values are never printed by normal commands.
-- Secret values are injected only into child processes.
-- Command output is redacted before it is printed.
-- Project identity is verified before command execution.
-- High-risk contexts require explicit confirmation.
-- Audit logs record decisions and references, not raw secret values.
-- If identity cannot be verified, Keyrail fails closed.
 
 ## Development
 
@@ -193,18 +232,8 @@ npm run check
 npm_config_cache=/private/tmp/keyrail-npm-cache npm run pack:dry-run
 ```
 
-The repository is a Node.js workspace:
-
-```text
-packages/
-  cli/
-  core/
-  backends/
-  policy/
-```
-
-## Release Status
+## Status
 
 Current version: `0.1.0`.
 
-The package is prepared for public npm publishing, but publishing requires npm account access.
+The repository is ready for npm publishing once package ownership and npm credentials are configured.

@@ -61,6 +61,8 @@ test("ui renders current project state", async () => {
   const html = await renderUiHtml(cwd);
   assert.match(html, /Keyrail/);
   assert.match(html, /manifest-editor/);
+  assert.match(html, /Agent Command/);
+  assert.match(html, /Services/);
 });
 
 test("context and secret management commands update the manifest", async () => {
@@ -81,6 +83,30 @@ test("context and secret management commands update the manifest", async () => {
   const payload = JSON.parse(current.stdout);
   assert.equal(payload.context.name, "staging");
   assert.deepEqual(payload.context.secrets, { openai: "demo-openai" });
+});
+
+test("link and unlink provide the simple service routing workflow", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-link-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const link = run(["link", "vercel", "demo-vercel"], cwd);
+  assert.equal(link.status, 0, link.stderr);
+
+  const current = run(["current", "--json"], cwd);
+  assert.equal(current.status, 0, current.stderr);
+  const payload = JSON.parse(current.stdout);
+  assert.equal(payload.services[0].service, "vercel");
+  assert.equal(payload.services[0].envName, "VERCEL_TOKEN");
+  assert.match(payload.agent.instruction, /keyrail run/);
+
+  const projects = run(["projects", "--json"], cwd);
+  assert.equal(projects.status, 0, projects.stderr);
+  assert.equal(JSON.parse(projects.stdout)[0].services[0].service, "vercel");
+
+  const unlink = run(["unlink", "vercel"], cwd);
+  assert.equal(unlink.status, 0, unlink.stderr);
+  const after = JSON.parse(run(["current", "--json"], cwd).stdout);
+  assert.deepEqual(after.services, []);
 });
 
 test("policy and audit commands expose configured rules and run decisions", async () => {

@@ -40,6 +40,12 @@ export async function main(argv) {
       return runCommand(args, flags, passthrough);
     case "handoff":
       return handoffCommand(flags);
+    case "link":
+      return linkCommand(args, flags);
+    case "unlink":
+      return unlinkCommand(args, flags);
+    case "projects":
+      return projectsCommand(args, flags);
     case "secrets":
       return secretsCommand(args, flags);
     case "context":
@@ -101,11 +107,21 @@ async function currentCommand(flags) {
   const state = await getVerifiedState(flags.context);
   const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
   const secrets = await secretBackend.listReferences(state.context.secrets);
+  const services = secrets.map((secret) => ({
+    service: secret.provider,
+    reference: secret.reference,
+    envName: secret.envName,
+    configured: secret.configured
+  }));
   const payload = {
     project: state.manifest.project,
     context: state.context,
     identity: state.identity,
-    secrets
+    services,
+    agent: {
+      verified: true,
+      instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
+    }
   };
 
   if (flags.json) return printJson(payload);
@@ -113,7 +129,7 @@ async function currentCommand(flags) {
   console.log(`Root: ${state.root}`);
   console.log(`Context: ${state.context.name} (${state.context.risk})`);
   console.log(`Identity: ${state.verification.reason}`);
-  printSecretReferences(secrets);
+  printServiceLinks(services);
 }
 
 async function identifyCommand(flags) {
@@ -241,6 +257,68 @@ async function handoffCommand(flags) {
   console.log(`Context: ${payload.context.name} (${payload.context.risk})`);
   console.log(`Identity: ${payload.identity.reason}`);
   printSecretReferences(payload.secrets);
+}
+
+async function linkCommand(args, flags) {
+  const service = args[0] ?? flags.service;
+  const reference = args[1] ?? flags.reference;
+  if (!service || !reference) {
+    throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail link <service> <reference> [--value <secret>]");
+  }
+
+  const loaded = await loadManifest(process.cwd());
+  const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+  setSecretReference(loaded.manifest, contextName, service, reference);
+  await writeManifest(loaded.root, loaded.manifest);
+
+  if (flags.value) {
+    const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
+    await backend.set(reference, flags.value);
+  }
+
+  console.log(`Linked ${service} to ${reference} for ${loaded.manifest.project.id}/${contextName}`);
+}
+
+async function unlinkCommand(args, flags) {
+  const service = args[0] ?? flags.service;
+  if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail unlink <service>");
+
+  const loaded = await loadManifest(process.cwd());
+  const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+  const reference = getContext(loaded.manifest, contextName).secrets[service];
+  removeSecretReference(loaded.manifest, contextName, service);
+  await writeManifest(loaded.root, loaded.manifest);
+
+  if (flags.deleteValue && reference) {
+    const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
+    if (typeof backend.unset === "function") await backend.unset(reference);
+  }
+
+  console.log(`Unlinked ${service} from ${loaded.manifest.project.id}/${contextName}`);
+}
+
+async function projectsCommand(args, flags) {
+  const state = await getVerifiedState(flags.context);
+  const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
+  const services = await backend.listReferences(state.context.secrets);
+  const payload = {
+    active: true,
+    id: state.manifest.project.id,
+    name: state.manifest.project.name,
+    root: state.root,
+    context: state.context.name,
+    services: services.map((service) => ({
+      service: service.provider,
+      reference: service.reference,
+      configured: service.configured
+    }))
+  };
+
+  if (flags.json) return printJson([payload]);
+  console.log(`${payload.name} (${payload.id})`);
+  console.log(`Root: ${payload.root}`);
+  console.log(`Context: ${payload.context}`);
+  printServiceLinks(payload.services);
 }
 
 async function secretsCommand(args, flags) {
@@ -512,6 +590,18 @@ function printSecretReferences(secrets) {
   }
 }
 
+function printServiceLinks(services) {
+  if (!services.length) {
+    console.log("Linked services: none");
+    return;
+  }
+  console.log("Linked services:");
+  for (const service of services) {
+    const name = service.service ?? service.provider;
+    console.log(`- ${name}: ${service.reference} (${service.configured ? "configured" : "reference only"})`);
+  }
+}
+
 async function spawnRedacted(command, env, secretValues) {
   return new Promise((resolve, reject) => {
     const child = spawn(command[0], command.slice(1), {
@@ -574,17 +664,22 @@ function printHelp() {
 
 Usage:
   keyrail init [--id <id>] [--name <name>] [--repo <url|local>] [--context <name>]
-  keyrail bind [--context <name>]
+  keyrail link <service> <reference> [--value <secret>]
+  keyrail unlink <service>
   keyrail current [--json] [--context <name>]
+  keyrail run [--context <name>] [--yes] -- <command>
+  keyrail ui [--port <port>] [--token <token>]
+
+Advanced:
+  keyrail bind [--context <name>]
   keyrail identify [--json]
   keyrail doctor [--json] [--context <name>]
-  keyrail run [--context <name>] [--yes] -- <command>
+  keyrail projects [--json]
   keyrail context list|use|add|remove
   keyrail policy show|allow|deny|require-confirm
   keyrail handoff [--json] [--context <name>]
   keyrail secrets list|set|unset [--context <name>]
   keyrail audit list [--json]
-  keyrail ui [--port <port>] [--token <token>]
 `);
 }
 
@@ -611,6 +706,12 @@ export async function getStateForUi(root = process.cwd(), requestedContext = nul
     identity,
     verification,
     secrets,
+    services: secrets.map((secret) => ({
+      service: secret.provider,
+      reference: secret.reference,
+      envName: secret.envName,
+      configured: secret.configured
+    })),
     audit,
     policy: loaded.manifest.policy,
     activeContext
@@ -636,7 +737,7 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Keyrail</title>
   <style>
-    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --bg: #f5f7fb; --panel: #ffffff; --border: #d7dbe7; --text: #101828; --muted: #667085; --accent: #2563eb; }
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --bg: #f5f7fb; --panel: #ffffff; --border: #d7dbe7; --text: #101828; --muted: #667085; --accent: #2563eb; --ok: #14804a; --warn: #b54708; }
     body { margin: 0; background: var(--bg); color: var(--text); }
     header, section { padding: 16px 20px; border-bottom: 1px solid var(--border); }
     header { display:flex; justify-content:space-between; align-items:center; gap:16px; background: var(--panel); position: sticky; top: 0; }
@@ -656,6 +757,11 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
     .split { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .toolbar { display:flex; gap: 8px; flex-wrap: wrap; align-items:center; }
     .tag { display:inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 12px; }
+    .service-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); }
+    .service-row:last-child { border-bottom:0; }
+    .status-ok { color: var(--ok); }
+    .status-warn { color: var(--warn); }
+    code { background:#f2f4f7; padding:2px 6px; border-radius:6px; }
     @media (max-width: 980px) { main { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--border); } .split { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -663,7 +769,7 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
   <header>
     <div>
       <strong>Keyrail</strong>
-      <span class="muted">local project identity and credential routing</span>
+      <span class="muted">project keys for local agents</span>
     </div>
     <div class="toolbar">
       <button class="primary" onclick="saveManifest()">Save manifest</button>
@@ -684,13 +790,18 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
           <div class="contexts" id="context-list"></div>
         </div>
         <div class="card">
-          <div class="muted">Secrets</div>
+          <div class="muted">Services</div>
           <div id="secret-list"></div>
         </div>
       </div>
     </aside>
     <article>
       <div class="split">
+        <section class="card">
+          <div class="muted">Agent Command</div>
+          <p>Run project commands through <code>keyrail run -- &lt;command&gt;</code>.</p>
+          <p class="muted">Keyrail verifies this project and injects only the linked service keys for the active context.</p>
+        </section>
         <section class="card">
           <div class="muted">Manifest</div>
           <textarea id="manifest-editor"></textarea>
@@ -733,9 +844,9 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
 
     function render() {
       contextList.innerHTML = state.contexts.map((context) => '<button class="context-btn' + (context.name === state.activeContext ? ' active' : '') + '" onclick="switchContext(\\'' + escapeJs(context.name) + '\\')">' + escapeHtml(context.name) + '</button>').join('');
-      secretList.innerHTML = state.secrets.length
-        ? state.secrets.map((secret) => '<div>' + escapeHtml(secret.provider) + ': <span class="muted">' + escapeHtml(secret.reference) + '</span></div>').join('')
-        : '<div class="muted">No secrets</div>';
+      secretList.innerHTML = state.services.length
+        ? state.services.map((service) => '<div class="service-row"><div><strong>' + escapeHtml(service.service) + '</strong><div class="muted">' + escapeHtml(service.reference) + ' -> ' + escapeHtml(service.envName) + '</div></div><span class="' + (service.configured ? 'status-ok' : 'status-warn') + '">' + (service.configured ? 'Ready' : 'Reference only') + '</span></div>').join('')
+        : '<div class="muted">No services linked yet. Use keyrail link github my-github-key.</div>';
       auditLog.textContent = state.audit?.length ? state.audit.map((entry) => JSON.stringify(entry, null, 2)).join('\\n\\n') : 'No audit entries';
       window.__manifestDraft = stateToManifest(state, editor.value);
     }

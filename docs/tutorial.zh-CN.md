@@ -1,91 +1,157 @@
 # Keyrail 教程
 
-这个教程演示如何给一个本地项目配置 `local`、`staging`、`production` 三个 context，并让 Agent 通过 Keyrail 安全执行命令。
+这个教程演示 Keyrail 最核心的流程：把服务 key 绑定到本地工程，然后让 Agent 通过 Keyrail 执行命令。
 
-## 1. 初始化项目
+## 目标
 
-在仓库根目录执行：
+假设一个工程会用到：
+
+- GitHub
+- Vercel
+- Supabase
+- OpenAI
+
+你希望本地 Agent 只使用这个工程自己的 key，而不是误用其他 repo 的 key。
+
+## 1. 初始化 Keyrail
+
+在项目根目录执行：
 
 ```bash
-keyrail init --id acme-web --name "Acme Web" --repo local
+keyrail init
 ```
 
-早期本地测试可以使用 `--repo local`。真实项目建议绑定 Git remote：
-
-```bash
-keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
-```
-
-命令会创建：
+会创建：
 
 ```text
 .agent-context.yaml
 .ctx/lock.yaml
 ```
 
-## 2. 检查身份
+真实 GitHub 项目建议绑定 remote：
 
 ```bash
-keyrail identify
-keyrail current
-keyrail doctor
+keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
 ```
 
-`identify` 会展示 Git remote、package name 等识别信号。`current` 展示当前项目和 context。`doctor` 检查 manifest、身份和 secret 引用是否可用。
+本地测试时使用 `repo: local` 就可以。
 
-## 3. 添加 Context
+## 2. 绑定服务 Key
+
+绑定这个工程会用到的服务：
+
+```bash
+keyrail link github acme-github-token
+keyrail link vercel acme-vercel-token
+keyrail link supabase acme-supabase-token
+keyrail link openai acme-openai-dev
+```
+
+这些是引用名，可以安全保存在 `.agent-context.yaml` 里。
+
+如果想让 Keyrail 保存本地开发值：
+
+```bash
+keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
+```
+
+本地值会写入 `.keyrail/secrets.local.json`，这个文件不应该进 git。
+
+## 3. 查看 Agent 能看到什么
+
+```bash
+keyrail current --json
+```
+
+输出会告诉 Agent：
+
+- 当前是哪个工程
+- 绑定了哪些服务
+- 每个服务映射到哪个环境变量
+- key 是否已配置
+- 应该使用 `keyrail run -- <command>` 执行命令
+
+这是最主要的 Agent 集成入口。
+
+## 4. 通过 Keyrail 执行命令
+
+```bash
+keyrail run -- gh issue list
+keyrail run -- vercel deploy
+keyrail run -- supabase db push
+```
+
+Keyrail 会校验项目身份、解析绑定的 key、注入子进程、脱敏输出，并写入 audit。
+
+## 5. 使用本地 UI
+
+```bash
+keyrail ui
+```
+
+打开命令输出里的 URL。UI 会展示：
+
+- 当前工程
+- active context
+- 已绑定服务
+- key 是否 ready
+- Agent 应该使用的命令方式
+- 高级 manifest 和 audit 视图
+
+这是小白用户最容易理解的入口。
+
+## 6. 常见用法
+
+使用环境变量，不保存本地文件：
+
+```bash
+export VERCEL_TOKEN=...
+keyrail link vercel acme-vercel-token
+keyrail run -- vercel deploy
+```
+
+移除服务绑定：
+
+```bash
+keyrail unlink vercel
+```
+
+查看已绑定服务：
+
+```bash
+keyrail current
+```
+
+## 7. 高级：Staging 和 Production
+
+如果项目需要多个环境：
 
 ```bash
 keyrail context add staging --risk medium
 keyrail context add production --risk high --confirm
-keyrail context list
-```
-
-切换 context：
-
-```bash
 keyrail context use staging
 ```
 
-active context 会写入 `.ctx/lock.yaml`，这样恢复终端或 Agent 会话时不需要猜当前环境。
-
-## 4. 添加 Secret 引用
-
-Keyrail 的 manifest 保存的是 secret 引用，不是明文值：
+每个 context 可以绑定不同 key：
 
 ```bash
-keyrail secrets set openai acme-openai-dev
-keyrail secrets set github acme-github-limited
-keyrail secrets list
+keyrail context use production
+keyrail link vercel acme-vercel-prod
 ```
 
-如果带 `--value`，Keyrail 会把值写入本地开发 backend：
+high-risk context 默认需要确认。自动化场景可以显式传入：
 
 ```bash
-keyrail secrets set openai acme-openai-dev --value "$OPENAI_API_KEY"
+KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
 ```
 
-本地 backend 文件是：
+## 8. 高级：Policy 和 Audit
 
-```text
-.keyrail/secrets.local.json
-```
-
-这个文件已被 `.gitignore` 忽略。
-
-## 5. 配置命令策略
-
-允许安全命令：
+允许常用命令：
 
 ```bash
-keyrail policy allow gh issue list
 keyrail policy allow vercel deploy
-```
-
-对高风险命令要求确认：
-
-```bash
-keyrail policy require-confirm vercel deploy --prod
+keyrail policy allow supabase db push
 ```
 
 禁止危险命令：
@@ -94,78 +160,17 @@ keyrail policy require-confirm vercel deploy --prod
 keyrail policy deny gh repo delete
 ```
 
-查看 policy：
-
-```bash
-keyrail policy show
-```
-
-## 6. 安全执行命令
-
-通过 Keyrail 执行命令：
-
-```bash
-keyrail run -- gh issue list
-```
-
-Keyrail 会依次做这些事：
-
-1. 校验项目身份
-2. 解析 active context
-3. 评估 policy
-4. 将解析到的 secret 注入子进程
-5. 对输出做脱敏
-6. 写入 audit 事件
-
-## 7. 保护生产环境
-
-生产环境应该配置为 high risk：
-
-```yaml
-contexts:
-  production:
-    risk: high
-    require_confirmation: true
-    secrets:
-      vercel: acme-vercel-prod
-```
-
-非交互自动化可以使用：
-
-```bash
-KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
-```
-
-人工执行时，Keyrail 会要求输入项目和 context 名称确认。
-
-## 8. 使用本地 UI
-
-启动 UI：
-
-```bash
-keyrail ui
-```
-
-打开命令输出中的 URL。UI 可以切换 context、编辑 manifest、查看 secret 引用和 audit 事件。
-
-## 9. 给 Agent 做 Handoff
-
-生成 Agent 可读的上下文摘要：
-
-```bash
-keyrail handoff
-keyrail handoff --json
-```
-
-handoff 包含项目身份、active context、policy 和 secret 引用，不包含明文 secret。
-
-## 10. 查看 Audit
-
-查看最近的执行决策：
+查看最近命令决策：
 
 ```bash
 keyrail audit list
 keyrail audit list --json
 ```
 
-audit 记录包含 command、context、decision、注入的引用和缺失的引用，不包含明文 secret。
+## 9. Handoff 给另一个 Agent
+
+```bash
+keyrail handoff --json
+```
+
+handoff 会包含项目身份、active context、已绑定服务和 policy，不包含明文 secret。

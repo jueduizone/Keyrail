@@ -1,19 +1,24 @@
 # Keyrail Tutorial
 
-This tutorial walks through a practical local setup for a project with `local`, `staging`, and `production` contexts.
+This tutorial shows the simplest Keyrail workflow: link service keys to a local project, then make agents run commands through Keyrail.
 
-## 1. Initialize a Project
+## Goal
 
-From a repository root:
+You have a project that uses:
+
+- GitHub
+- Vercel
+- Supabase
+- OpenAI
+
+You want a local agent to use this project’s keys, not keys from another repo.
+
+## 1. Initialize Keyrail
+
+From the project root:
 
 ```bash
-keyrail init --id acme-web --name "Acme Web" --repo local
-```
-
-Use `--repo local` for early local testing. In a real repository, use the Git remote:
-
-```bash
-keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
+keyrail init
 ```
 
 This creates:
@@ -23,69 +28,130 @@ This creates:
 .ctx/lock.yaml
 ```
 
-## 2. Check Identity
+For a real GitHub repository, bind the remote explicitly:
 
 ```bash
-keyrail identify
-keyrail current
-keyrail doctor
+keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
 ```
 
-`identify` reports signals such as Git remote and package name. `current` shows the active project and context. `doctor` checks whether the manifest, identity, and secret references are usable.
+For local testing, `repo: local` is fine.
 
-## 3. Add Contexts
+## 2. Link Service Keys
+
+Link the services this project uses:
+
+```bash
+keyrail link github acme-github-token
+keyrail link vercel acme-vercel-token
+keyrail link supabase acme-supabase-token
+keyrail link openai acme-openai-dev
+```
+
+These names are references. They are safe to store in `.agent-context.yaml`.
+
+If you want Keyrail to store a local development value:
+
+```bash
+keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
+```
+
+Local values are written to `.keyrail/secrets.local.json`, which should stay out of git.
+
+## 3. Check What the Agent Sees
+
+```bash
+keyrail current --json
+```
+
+The output tells the agent:
+
+- which project it is in
+- which services are linked
+- which env vars those services map to
+- whether each key is configured
+- that commands should run through `keyrail run -- <command>`
+
+This is the main agent-friendly integration point.
+
+## 4. Run Commands Through Keyrail
+
+```bash
+keyrail run -- gh issue list
+keyrail run -- vercel deploy
+keyrail run -- supabase db push
+```
+
+Keyrail verifies the project, resolves linked keys, injects them into the child process, redacts output, and writes an audit entry.
+
+## 5. Use the Local UI
+
+```bash
+keyrail ui
+```
+
+Open the printed URL. The UI shows:
+
+- current project
+- active context
+- linked services
+- ready vs reference-only keys
+- the agent command pattern
+- advanced manifest and audit views
+
+This is the easiest path for non-technical users.
+
+## 6. Common Patterns
+
+Use environment variables instead of local file storage:
+
+```bash
+export VERCEL_TOKEN=...
+keyrail link vercel acme-vercel-token
+keyrail run -- vercel deploy
+```
+
+Remove a service link:
+
+```bash
+keyrail unlink vercel
+```
+
+List linked services:
+
+```bash
+keyrail current
+```
+
+## 7. Advanced: Staging and Production
+
+If a project needs multiple environments:
 
 ```bash
 keyrail context add staging --risk medium
 keyrail context add production --risk high --confirm
-keyrail context list
-```
-
-Switch contexts:
-
-```bash
 keyrail context use staging
 ```
 
-The active context is stored in `.ctx/lock.yaml`, so a resumed terminal or agent session does not have to guess.
-
-## 4. Add Secret References
-
-Secret references are names, not raw values:
+Link service keys per context:
 
 ```bash
-keyrail secrets set openai acme-openai-dev
-keyrail secrets set github acme-github-limited
-keyrail secrets list
+keyrail context use production
+keyrail link vercel acme-vercel-prod
 ```
 
-If you pass `--value`, Keyrail stores the value in the local development backend:
+High-risk contexts require confirmation unless you explicitly pass:
 
 ```bash
-keyrail secrets set openai acme-openai-dev --value "$OPENAI_API_KEY"
+KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
 ```
 
-The local backend writes to:
+## 8. Advanced: Policy and Audit
 
-```text
-.keyrail/secrets.local.json
-```
-
-That file is ignored by git.
-
-## 5. Add Command Policy
-
-Allow safe commands:
+Allow expected commands:
 
 ```bash
-keyrail policy allow gh issue list
 keyrail policy allow vercel deploy
-```
-
-Require confirmation for risky commands:
-
-```bash
-keyrail policy require-confirm vercel deploy --prod
+keyrail policy allow supabase db push
 ```
 
 Deny dangerous commands:
@@ -94,78 +160,17 @@ Deny dangerous commands:
 keyrail policy deny gh repo delete
 ```
 
-View policy:
-
-```bash
-keyrail policy show
-```
-
-## 6. Run Commands Safely
-
-Run commands through Keyrail:
-
-```bash
-keyrail run -- gh issue list
-```
-
-Keyrail will:
-
-1. verify the project identity
-2. resolve the active context
-3. evaluate policy
-4. inject resolved secrets into the child process
-5. redact command output
-6. write an audit event
-
-## 7. Protect Production
-
-Production contexts should be high risk:
-
-```yaml
-contexts:
-  production:
-    risk: high
-    require_confirmation: true
-    secrets:
-      vercel: acme-vercel-prod
-```
-
-In non-interactive automation, use:
-
-```bash
-KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
-```
-
-For manual use, Keyrail asks you to type the project/context name before high-risk execution.
-
-## 8. Use the Local UI
-
-Start the UI:
-
-```bash
-keyrail ui
-```
-
-Open the printed URL. The UI can switch contexts, edit the manifest, inspect secret references, and review audit events.
-
-## 9. Handoff to an Agent
-
-Generate an agent-readable summary:
-
-```bash
-keyrail handoff
-keyrail handoff --json
-```
-
-The handoff includes project identity, active context, policy, and secret references. It never includes raw secret values.
-
-## 10. Audit
-
-View recent execution decisions:
+View recent command decisions:
 
 ```bash
 keyrail audit list
 keyrail audit list --json
 ```
 
-Audit entries include command, context, decision, injected references, and missing references. They do not include raw secret values.
+## 9. Handoff to Another Agent
+
+```bash
+keyrail handoff --json
+```
+
+The handoff includes project identity, active context, linked services, and policy. It does not include raw secret values.
