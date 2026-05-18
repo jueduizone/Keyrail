@@ -28,6 +28,8 @@ This creates:
 .ctx/lock.yaml
 ```
 
+`.agent-context.yaml` is project routing and can be committed. `.ctx/lock.yaml` is local active-context state and should stay out of git.
+
 For a real GitHub repository, bind the remote explicitly:
 
 ```bash

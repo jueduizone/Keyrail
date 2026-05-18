@@ -165,11 +165,42 @@ test("auth commands manage user-level service accounts", async () => {
   const list = run(["auth", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.equal(list.status, 0, list.stderr);
   assert.equal(JSON.parse(list.stdout).services.github.reference, "personal");
+  assert.equal(JSON.parse(list.stdout).accounts.github.personal.reference, "personal");
 
-  const remove = run(["auth", "remove", "github", "--delete-value"], cwd, { KEYRAIL_HOME: keyrailHome });
+  const remove = run(["auth", "remove", "github", "personal", "--delete-value"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.equal(remove.status, 0, remove.stderr);
   const after = JSON.parse(run(["auth", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout);
   assert.deepEqual(after.services, {});
+  assert.deepEqual(after.accounts, {});
+});
+
+test("auth can keep multiple accounts for the same service", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-auth-multi-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-auth-multi-home-"));
+
+  assert.equal(run(["auth", "add", "github", "personal", "--value", "DUMMY_PERSONAL_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+  assert.equal(run(["auth", "add", "github", "work", "--value", "DUMMY_WORK_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+
+  const listed = JSON.parse(run(["auth", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout);
+  assert.deepEqual(Object.keys(listed.accounts.github).sort(), ["personal", "work"]);
+  assert.equal(listed.services.github.reference, "work");
+
+  const personal = run(["with", "github", "personal", "--", "node", "-e", "console.log(process.env.GITHUB_TOKEN)"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(personal.status, 0, personal.stderr);
+  assert.match(personal.stdout, /\[REDACTED\]/);
+  assert.doesNotMatch(personal.stdout, /DUMMY_PERSONAL_GITHUB_TOKEN/);
+
+  const removeWork = run(["auth", "remove", "github", "work", "--delete-value"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(removeWork.status, 0, removeWork.stderr);
+  const after = JSON.parse(run(["auth", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout);
+  assert.deepEqual(Object.keys(after.accounts.github), ["personal"]);
+  assert.equal(after.services.github.reference, "personal");
 });
 
 test("profile set accepts secret values from stdin", async () => {

@@ -1,6 +1,7 @@
 node_modules/
 .DS_Store
 .keyrail/
+.ctx/
 coverage/
 dist/
 *.log

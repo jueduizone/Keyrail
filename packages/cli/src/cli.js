@@ -276,7 +276,7 @@ async function linkCommand(args, flags) {
   const service = args[0] ?? flags.service;
   const reference = args[1] ?? flags.reference;
   if (!service || !reference) {
-    throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail link <service> <reference> [--value <secret>]");
+    throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail attach <service> <name> [--value <secret>]");
   }
 
   const loaded = await loadManifest(process.cwd());
@@ -294,7 +294,7 @@ async function linkCommand(args, flags) {
 
 async function unlinkCommand(args, flags) {
   const service = args[0] ?? flags.service;
-  if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail unlink <service>");
+  if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail detach <service>");
 
   const loaded = await loadManifest(process.cwd());
   const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
@@ -341,13 +341,16 @@ async function profileCommand(args, flags) {
   if (subcommand === "list") {
     const profile = await readProfile();
     if (flags.json) return printJson(profile);
-    if (!Object.keys(profile.services).length) {
-      console.log("Profiles: none");
+    if (!Object.keys(profile.accounts).length) {
+      console.log("Accounts: none");
       return;
     }
-    console.log("Profiles:");
-    for (const [service, entry] of Object.entries(profile.services)) {
-      console.log(`- ${service}: ${entry.reference}`);
+    console.log("Accounts:");
+    for (const [service, accounts] of Object.entries(profile.accounts)) {
+      const defaultReference = profile.services[service]?.reference;
+      for (const reference of Object.keys(accounts)) {
+        console.log(`- ${service}: ${reference}${reference === defaultReference ? " (default)" : ""}`);
+      }
     }
     return;
   }
@@ -359,21 +362,34 @@ async function profileCommand(args, flags) {
     if (!service || !reference) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail profile set <service> <reference> [--value <secret>|--value-stdin]");
     const profile = await readProfile();
     profile.services[service] = { reference };
+    profile.accounts[service] = profile.accounts[service] ?? {};
+    profile.accounts[service][reference] = { reference };
     await writeProfile(profilePath, profile);
     if (value) await new GlobalSecretStore().set(reference, value);
-    console.log(`Saved ${service} profile ${reference}`);
+    console.log(`Saved ${service} account ${reference}`);
     return;
   }
 
   if (subcommand === "unset") {
     const service = args[1] ?? flags.service;
-    if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail profile unset <service>");
+    const requestedReference = args[2] ?? flags.reference ?? flags.name;
+    if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail auth remove <service> [name]");
     const profile = await readProfile();
-    const reference = profile.services[service]?.reference;
-    delete profile.services[service];
+    const reference = requestedReference ?? profile.services[service]?.reference;
+    if (requestedReference) {
+      delete profile.accounts[service]?.[requestedReference];
+      if (profile.accounts[service] && !Object.keys(profile.accounts[service]).length) delete profile.accounts[service];
+      if (profile.services[service]?.reference === requestedReference) {
+        const nextReference = Object.keys(profile.accounts[service] ?? {})[0];
+        if (nextReference) profile.services[service] = { reference: nextReference };
+        else delete profile.services[service];
+      }
+    } else {
+      delete profile.services[service];
+    }
     await writeProfile(profilePath, profile);
     if (flags.deleteValue && reference) await new GlobalSecretStore().unset(reference);
-    console.log(`Removed ${service} profile`);
+    console.log(`Removed ${service}${reference ? ` account ${reference}` : " default account"}`);
     return;
   }
 
@@ -391,7 +407,8 @@ async function authCommand(args, flags) {
   }
   if (subcommand === "remove" || subcommand === "rm" || subcommand === "unset") {
     const service = args[1] ?? flags.service;
-    return profileCommand(["unset", service].filter(Boolean), flags);
+    const reference = args[2] ?? flags.reference ?? flags.name;
+    return profileCommand(["unset", service, reference].filter(Boolean), flags);
   }
 
   throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail auth add|list|remove");
@@ -407,12 +424,12 @@ async function useCommand(args, flags, passthrough) {
   const profile = await readProfile();
   const reference = flags.reference ?? profile.services[service]?.reference;
   if (!reference) {
-    throw new KeyrailError("PROFILE_NOT_FOUND", `No ${service} profile configured. Run keyrail profile set ${service} <reference> --value-stdin`);
+    throw new KeyrailError("PROFILE_NOT_FOUND", `No ${service} account configured. Run keyrail auth add ${service} <name> --value-stdin`);
   }
 
   const token = await new GlobalSecretStore().get(reference);
   if (!token) {
-    throw new KeyrailError("SECRET_NOT_FOUND", `No value found for ${reference}. Run keyrail profile set ${service} ${reference} --value-stdin`);
+    throw new KeyrailError("SECRET_NOT_FOUND", `No value found for ${reference}. Run keyrail auth add ${service} ${reference} --value-stdin`);
   }
 
   const env = await envForServiceCommand(service, token, command);
@@ -822,9 +839,15 @@ async function readProfile() {
   try {
     const raw = await readFile(getProfilePath(), "utf8");
     const profile = JSON.parse(raw);
-    return { version: 1, services: {}, ...profile, services: profile.services ?? {} };
+    const services = profile.services ?? {};
+    const accounts = profile.accounts ?? {};
+    for (const [service, entry] of Object.entries(services)) {
+      accounts[service] = accounts[service] ?? {};
+      if (entry?.reference) accounts[service][entry.reference] = { reference: entry.reference };
+    }
+    return { version: 1, services, accounts, ...profile, services, accounts };
   } catch (error) {
-    if (error.code === "ENOENT") return { version: 1, services: {} };
+    if (error.code === "ENOENT") return { version: 1, services: {}, accounts: {} };
     throw error;
   }
 }
@@ -1027,7 +1050,7 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
       contextList.innerHTML = state.contexts.map((context) => '<button class="context-btn' + (context.name === state.activeContext ? ' active' : '') + '" onclick="switchContext(\\'' + escapeJs(context.name) + '\\')">' + escapeHtml(context.name) + '</button>').join('');
       secretList.innerHTML = state.services.length
         ? state.services.map((service) => '<div class="service-row"><div><strong>' + escapeHtml(service.service) + '</strong><div class="muted">' + escapeHtml(service.reference) + ' -> ' + escapeHtml(service.envName) + '</div></div><span class="' + (service.configured ? 'status-ok' : 'status-warn') + '">' + (service.configured ? 'Ready' : 'Reference only') + '</span></div>').join('')
-        : '<div class="muted">No services linked yet. Use keyrail link github my-github-key.</div>';
+        : '<div class="muted">No services attached yet. Use keyrail attach github personal.</div>';
       auditLog.textContent = state.audit?.length ? state.audit.map((entry) => JSON.stringify(entry, null, 2)).join('\\n\\n') : 'No audit entries';
       window.__manifestDraft = stateToManifest(state, editor.value);
     }

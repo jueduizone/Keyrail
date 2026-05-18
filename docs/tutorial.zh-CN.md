@@ -28,6 +28,8 @@ keyrail init
 .ctx/lock.yaml
 ```
 
+`.agent-context.yaml` 是项目路由配置，可以提交；`.ctx/lock.yaml` 是本机 active context 状态，不应该进 git。
+
 真实 GitHub 项目建议绑定 remote：
 
 ```bash
