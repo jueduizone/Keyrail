@@ -109,6 +109,24 @@ test("link and unlink provide the simple service routing workflow", async () => 
   assert.deepEqual(after.services, []);
 });
 
+test("attach status and detach provide the human-friendly service routing workflow", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-attach-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const attach = run(["attach", "vercel", "demo-vercel"], cwd);
+  assert.equal(attach.status, 0, attach.stderr);
+
+  const status = run(["status", "--json"], cwd);
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  assert.equal(payload.services[0].service, "vercel");
+  assert.equal(payload.services[0].reference, "demo-vercel");
+
+  const detach = run(["detach", "vercel"], cwd);
+  assert.equal(detach.status, 0, detach.stderr);
+  assert.deepEqual(JSON.parse(run(["status", "--json"], cwd).stdout).services, []);
+});
+
 test("profile commands use a user-level config root for private repo bootstrap", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-profile-cwd-"));
   const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-home-"));
@@ -133,6 +151,25 @@ test("profile commands use a user-level config root for private repo bootstrap",
   assert.equal(unset.status, 0, unset.stderr);
   const after = JSON.parse(await readFile(path.join(keyrailHome, "secrets.global.json"), "utf8"));
   assert.equal(after["personal-github"], undefined);
+});
+
+test("auth commands manage user-level service accounts", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-auth-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-auth-home-"));
+
+  const add = run(["auth", "add", "github", "personal", "--value-stdin"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }, "DUMMY_AUTH_GITHUB_TOKEN\n");
+  assert.equal(add.status, 0, add.stderr);
+
+  const list = run(["auth", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(list.status, 0, list.stderr);
+  assert.equal(JSON.parse(list.stdout).services.github.reference, "personal");
+
+  const remove = run(["auth", "remove", "github", "--delete-value"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(remove.status, 0, remove.stderr);
+  const after = JSON.parse(run(["auth", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout);
+  assert.deepEqual(after.services, {});
 });
 
 test("profile set accepts secret values from stdin", async () => {
@@ -167,11 +204,28 @@ test("use injects a configured service key into a normal child command", async (
   assert.doesNotMatch(result.stderr, /DUMMY_USE_GITHUB_TOKEN/);
 });
 
+test("with injects a named service account into a normal child command", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-with-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-with-home-"));
+
+  const add = run(["auth", "add", "github", "personal", "--value", "DUMMY_WITH_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(add.status, 0, add.stderr);
+
+  const result = run(["with", "github", "personal", "--", "node", "-e", "console.log(process.env.GITHUB_TOKEN)"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[REDACTED\]/);
+  assert.doesNotMatch(result.stdout, /DUMMY_WITH_GITHUB_TOKEN/);
+});
+
 test("agent skill documents current state and private repo bootstrap", async () => {
   const skill = await readFile(path.resolve("agents/keyrail/SKILL.md"), "utf8");
   await stat(path.resolve("docs/agent/README.md"));
-  assert.match(skill, /keyrail current --json/);
-  assert.match(skill, /keyrail use github/);
+  assert.match(skill, /keyrail status --json/);
+  assert.match(skill, /keyrail with github/);
   assert.match(skill, /Never read, print, or copy raw secret values/);
 });
 

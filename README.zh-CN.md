@@ -16,11 +16,11 @@ Keyrail 是一个本地项目凭据路由器。你可能在一台电脑上有很
 cd my-project
 
 keyrail init
-keyrail link github my-project-github-token
-keyrail link vercel my-project-vercel-token
-keyrail link supabase my-project-supabase-token
+keyrail attach github my-project-github-token
+keyrail attach vercel my-project-vercel-token
+keyrail attach supabase my-project-supabase-token
 
-keyrail current --json
+keyrail status --json
 keyrail run -- vercel deploy
 ```
 
@@ -52,7 +52,7 @@ Keyrail 的目标就是消除这种歧义。
 - 从本地 backend 或环境变量解析 key 引用
 - 只在 `keyrail run` 启动的子进程中注入 key
 - 对命令输出做脱敏
-- 通过 `current --json` 给 Agent 结构化上下文
+- 通过 `status --json` 给 Agent 结构化上下文
 - 提供本地图形界面，方便非技术用户管理
 
 ## 安装
@@ -82,21 +82,21 @@ keyrail init
 绑定服务 key 引用：
 
 ```bash
-keyrail link github acme-github-token
-keyrail link vercel acme-vercel-token
-keyrail link supabase acme-supabase-token
+keyrail attach github acme-github-token
+keyrail attach vercel acme-vercel-token
+keyrail attach supabase acme-supabase-token
 ```
 
 也可以保存一个本地开发值：
 
 ```bash
-keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
+keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
 ```
 
 给 Agent 查看当前工程：
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 通过 Keyrail 执行命令：
@@ -115,23 +115,23 @@ keyrail ui
 
 ## 私有仓库 Bootstrap
 
-如果私有仓库还没有 clone 到本地，这时 repo 里还没有 `.agent-context.yaml`，Agent 也就无法从项目配置里判断应该用哪个 GitHub PAT。先配置一个用户级 GitHub bootstrap profile，然后让 Agent 通过 Keyrail 执行正常 GitHub 命令：
+如果私有仓库还没有 clone 到本地，这时 repo 里还没有 `.agent-context.yaml`，Agent 也就无法从项目配置里判断应该用哪个 GitHub PAT。先保存一个用户级 GitHub 账号，然后让 Agent 通过 Keyrail 执行正常 GitHub 命令：
 
 ```bash
-keyrail profile set github personal-github --value-stdin
-keyrail use github -- gh repo clone owner/private-repo
+keyrail auth add github personal --value-stdin
+keyrail with github personal -- gh repo clone owner/private-repo
 cd private-repo
 keyrail init --repo git@github.com:owner/private-repo.git
-keyrail link github personal-github
-keyrail current --json
+keyrail attach github personal
+keyrail status --json
 ```
 
-把 PAT 通过 stdin 输入，或者从你自己的安全来源 pipe 进来。`keyrail use github -- ...` 会给子命令注入 `GITHUB_TOKEN`/`GH_TOKEN`。如果使用普通 `git clone https://...`，它也会使用临时 Git askpass helper，不会把 token 写进 Git remote URL。
+把 PAT 通过 stdin 输入，或者从你自己的安全来源 pipe 进来。`keyrail with github ... -- ...` 会给子命令注入 `GITHUB_TOKEN`/`GH_TOKEN`。如果使用普通 `git clone https://...`，它也会使用临时 Git askpass helper，不会把 token 写进 Git remote URL。
 
 仓库已经在本地之后，Agent 使用普通项目流程：
 
 ```bash
-keyrail current --json
+keyrail status --json
 keyrail run -- gh repo view
 ```
 
@@ -140,7 +140,7 @@ keyrail run -- gh repo view
 建议让 Agent 每次进入工程后先执行：
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 返回内容会包含：

@@ -33,6 +33,8 @@ export async function main(argv) {
       return bindCommand(flags);
     case "current":
       return currentCommand(flags);
+    case "status":
+      return currentCommand(flags);
     case "identify":
       return identifyCommand(flags);
     case "doctor":
@@ -42,8 +44,10 @@ export async function main(argv) {
     case "handoff":
       return handoffCommand(flags);
     case "link":
+    case "attach":
       return linkCommand(args, flags);
     case "unlink":
+    case "detach":
       return unlinkCommand(args, flags);
     case "projects":
       return projectsCommand(args, flags);
@@ -51,6 +55,10 @@ export async function main(argv) {
       return profileCommand(args, flags);
     case "use":
       return useCommand(args, flags, passthrough);
+    case "auth":
+      return authCommand(args, flags);
+    case "with":
+      return withCommand(args, flags, passthrough);
     case "secrets":
       return secretsCommand(args, flags);
     case "context":
@@ -372,6 +380,23 @@ async function profileCommand(args, flags) {
   throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail profile list|set|unset");
 }
 
+async function authCommand(args, flags) {
+  const subcommand = args[0] ?? "list";
+
+  if (subcommand === "list") return profileCommand(["list"], flags);
+  if (subcommand === "add" || subcommand === "set") {
+    const service = args[1] ?? flags.service;
+    const reference = args[2] ?? flags.reference;
+    return profileCommand(["set", service, reference].filter(Boolean), flags);
+  }
+  if (subcommand === "remove" || subcommand === "rm" || subcommand === "unset") {
+    const service = args[1] ?? flags.service;
+    return profileCommand(["unset", service].filter(Boolean), flags);
+  }
+
+  throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail auth add|list|remove");
+}
+
 async function useCommand(args, flags, passthrough) {
   const service = args[0] ?? flags.service;
   const command = passthrough.length > 0 ? passthrough : args.slice(1);
@@ -393,6 +418,22 @@ async function useCommand(args, flags, passthrough) {
   const env = await envForServiceCommand(service, token, command);
   const exitCode = await spawnRedacted(command, { ...process.env, ...env }, [token]);
   process.exitCode = exitCode;
+}
+
+async function withCommand(args, flags, passthrough) {
+  const service = args[0] ?? flags.service;
+  let reference = flags.reference;
+  let commandArgs = args.slice(1);
+
+  if (passthrough.length > 0) {
+    reference = reference ?? args[1];
+    commandArgs = [];
+  } else if (!reference && args.length >= 3) {
+    reference = args[1];
+    commandArgs = args.slice(2);
+  }
+
+  return useCommand([service, ...commandArgs].filter(Boolean), { ...flags, reference }, passthrough);
 }
 
 async function secretsCommand(args, flags) {
@@ -742,19 +783,21 @@ function printHelp() {
 
 Usage:
   keyrail init [--id <id>] [--name <name>] [--repo <url|local>] [--context <name>]
-  keyrail link <service> <reference> [--value <secret>]
-  keyrail unlink <service>
-  keyrail profile set github <reference> [--value-stdin]
-  keyrail use github -- <command>
-  keyrail current [--json] [--context <name>]
+  keyrail auth add github <name> [--value-stdin]
+  keyrail attach <service> <name> [--value <secret>]
+  keyrail detach <service>
+  keyrail with github [name] -- <command>
+  keyrail status [--json] [--context <name>]
   keyrail run [--context <name>] [--yes] -- <command>
   keyrail ui [--port <port>] [--token <token>]
 
 Advanced:
   keyrail bind [--context <name>]
+  keyrail current [--json] [--context <name>]
   keyrail identify [--json]
   keyrail doctor [--json] [--context <name>]
   keyrail projects [--json]
+  keyrail link|unlink <service> <reference>
   keyrail profile list|set|unset
   keyrail use <service> [--reference <reference>] -- <command>
   keyrail context list|use|add|remove

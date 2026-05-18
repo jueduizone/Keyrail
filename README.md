@@ -16,11 +16,11 @@ It is not a full secret manager. It is the local layer that binds a repo to serv
 cd my-project
 
 keyrail init
-keyrail link github my-project-github-token
-keyrail link vercel my-project-vercel-token
-keyrail link supabase my-project-supabase-token
+keyrail attach github my-project-github-token
+keyrail attach vercel my-project-vercel-token
+keyrail attach supabase my-project-supabase-token
 
-keyrail current --json
+keyrail status --json
 keyrail run -- vercel deploy
 ```
 
@@ -49,10 +49,10 @@ Keyrail removes that ambiguity.
 - Detects the current project.
 - Reads the project identity from `.agent-context.yaml`.
 - Shows linked services such as GitHub, Vercel, Supabase, OpenAI, and Stripe.
-- Resolves key references from a local backend or environment variables.
+- Resolves attached service account names from a local backend or environment variables.
 - Injects keys only into the child process launched by `keyrail run`.
 - Redacts command output.
-- Gives agents JSON output through `current --json`.
+- Gives agents JSON output through `status --json`.
 - Provides a local UI for non-technical users.
 
 ## Install
@@ -79,24 +79,24 @@ Initialize a project:
 keyrail init
 ```
 
-Link a service key reference:
+Attach service accounts to the project:
 
 ```bash
-keyrail link github acme-github-token
-keyrail link vercel acme-vercel-token
-keyrail link supabase acme-supabase-token
+keyrail attach github acme-github-token
+keyrail attach vercel acme-vercel-token
+keyrail attach supabase acme-supabase-token
 ```
 
 Optionally store a local development value:
 
 ```bash
-keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
+keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
 ```
 
 Show the current project in an agent-friendly format:
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 Run commands with the project’s linked keys:
@@ -115,23 +115,23 @@ keyrail ui
 
 ## Private Repo Bootstrap
 
-If the private repository is not cloned yet, there is no project manifest for the agent to read. Use a user-level GitHub bootstrap profile first, then let the agent run the normal GitHub command through Keyrail:
+If the private repository is not cloned yet, there is no project manifest for the agent to read. Save a user-level GitHub account first, then let the agent run the normal GitHub command through Keyrail:
 
 ```bash
-keyrail profile set github personal-github --value-stdin
-keyrail use github -- gh repo clone owner/private-repo
+keyrail auth add github personal --value-stdin
+keyrail with github personal -- gh repo clone owner/private-repo
 cd private-repo
 keyrail init --repo git@github.com:owner/private-repo.git
-keyrail link github personal-github
-keyrail current --json
+keyrail attach github personal
+keyrail status --json
 ```
 
-Paste the PAT into stdin when prompted by your shell or pipe it from your own secure source. `keyrail use github -- ...` injects `GITHUB_TOKEN`/`GH_TOKEN` for the child command. For plain `git clone https://...`, it also uses a temporary Git askpass helper so the token is not written into the Git remote URL.
+Paste the PAT into stdin when prompted by your shell or pipe it from your own secure source. `keyrail with github ... -- ...` injects `GITHUB_TOKEN`/`GH_TOKEN` for the child command. For plain `git clone https://...`, it also uses a temporary Git askpass helper so the token is not written into the Git remote URL.
 
 After the repository exists locally, agents should use the normal project flow:
 
 ```bash
-keyrail current --json
+keyrail status --json
 keyrail run -- gh repo view
 ```
 
@@ -140,7 +140,7 @@ keyrail run -- gh repo view
 Tell agents to start with:
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 The response includes:
@@ -185,7 +185,7 @@ It shows:
 - current project
 - active context
 - linked services
-- ready vs reference-only keys
+- ready vs account-name-only keys
 - agent command guidance
 - advanced manifest and audit views
 
@@ -222,7 +222,7 @@ policy:
     - gh repo delete
 ```
 
-The manifest stores references, not raw secret values.
+The manifest stores account names, not raw secret values.
 
 ## Secret Values
 

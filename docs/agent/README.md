@@ -16,7 +16,7 @@ agents/keyrail/SKILL.md
 Agents should start with:
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 Then use:
@@ -29,19 +29,19 @@ for service commands.
 
 ## Before a Private Repository Is Cloned
 
-When a repo does not exist locally yet, project-level Keyrail manifests are not available. Use a user-level bootstrap profile, then run the normal clone command through Keyrail:
+When a repo does not exist locally yet, project-level Keyrail manifests are not available. Save a user-level GitHub account, then run the normal clone command through Keyrail:
 
 ```bash
-keyrail profile set github personal-github --value-stdin
-keyrail use github -- gh repo clone owner/private-repo
+keyrail auth add github personal --value-stdin
+keyrail with github personal -- gh repo clone owner/private-repo
 ```
 
-This avoids placing the PAT in shell history or the remote URL. After cloning, initialize the project and bind the GitHub reference:
+This avoids placing the PAT in shell history or the remote URL. After cloning, initialize the project and attach the GitHub account:
 
 ```bash
 keyrail init --repo git@github.com:owner/private-repo.git
-keyrail link github personal-github
-keyrail current --json
+keyrail attach github personal
+keyrail status --json
 ```
 
 ## Future MCP Tools
@@ -50,8 +50,8 @@ Planned tools:
 
 - `keyrail.current`
 - `keyrail.list_services`
-- `keyrail.use`
+- `keyrail.with`
 - `keyrail.run`
 - `keyrail.handoff`
 
-The default MCP mode should expose read-only tools first. `run` and `use` should require explicit enablement.
+The default MCP mode should expose read-only tools first. `run` and `with` should require explicit enablement.

@@ -4,7 +4,7 @@ Local-first project identity and credential routing for agent-assisted developme
 
 ```bash
 npx @keyrail/cli init
-npx @keyrail/cli current
+npx @keyrail/cli status
 npx @keyrail/cli ui
 ```
 

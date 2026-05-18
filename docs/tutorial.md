@@ -1,6 +1,6 @@
 # Keyrail Tutorial
 
-This tutorial shows the simplest Keyrail workflow: link service keys to a local project, then make agents run commands through Keyrail.
+This tutorial shows the simplest Keyrail workflow: attach service accounts to a local project, then make agents run commands through Keyrail.
 
 ## Goal
 
@@ -38,35 +38,35 @@ For local testing, `repo: local` is fine.
 
 ## 2. Optional: Clone a Private Repo First
 
-If the private repo is not on disk yet, project-level Keyrail config cannot help because the project does not exist locally. Configure a user-level GitHub bootstrap profile, then run the normal clone command through Keyrail:
+If the private repo is not on disk yet, project-level Keyrail config cannot help because the project does not exist locally. Save a user-level GitHub account, then run the normal clone command through Keyrail:
 
 ```bash
-keyrail profile set github personal-github --value-stdin
-keyrail use github -- gh repo clone acme/private-repo
+keyrail auth add github personal --value-stdin
+keyrail with github personal -- gh repo clone acme/private-repo
 cd private-repo
 keyrail init --repo git@github.com:acme/private-repo.git
-keyrail link github personal-github
+keyrail attach github personal
 ```
 
-Use `--value-stdin` so the PAT is not part of shell history. The Git remote remains a normal GitHub URL without the token. If `gh` is not available, use `keyrail use github -- git clone https://github.com/acme/private-repo.git`.
+Use `--value-stdin` so the PAT is not part of shell history. The Git remote remains a normal GitHub URL without the token. If `gh` is not available, use `keyrail with github personal -- git clone https://github.com/acme/private-repo.git`.
 
-## 3. Link Service Keys
+## 3. Attach Service Accounts
 
-Link the services this project uses:
+Attach the services this project uses:
 
 ```bash
-keyrail link github acme-github-token
-keyrail link vercel acme-vercel-token
-keyrail link supabase acme-supabase-token
-keyrail link openai acme-openai-dev
+keyrail attach github acme-github-token
+keyrail attach vercel acme-vercel-token
+keyrail attach supabase acme-supabase-token
+keyrail attach openai acme-openai-dev
 ```
 
-These names are references. They are safe to store in `.agent-context.yaml`.
+These account names are safe to store in `.agent-context.yaml`.
 
 If you want Keyrail to store a local development value:
 
 ```bash
-keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
+keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
 ```
 
 Local values are written to `.keyrail/secrets.local.json`, which should stay out of git.
@@ -74,7 +74,7 @@ Local values are written to `.keyrail/secrets.local.json`, which should stay out
 ## 4. Check What the Agent Sees
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 The output tells the agent:
@@ -108,7 +108,7 @@ Open the printed URL. The UI shows:
 - current project
 - active context
 - linked services
-- ready vs reference-only keys
+- ready vs account-name-only keys
 - the agent command pattern
 - advanced manifest and audit views
 
@@ -120,20 +120,20 @@ Use environment variables instead of local file storage:
 
 ```bash
 export VERCEL_TOKEN=...
-keyrail link vercel acme-vercel-token
+keyrail attach vercel acme-vercel-token
 keyrail run -- vercel deploy
 ```
 
-Remove a service link:
+Remove a service attachment:
 
 ```bash
-keyrail unlink vercel
+keyrail detach vercel
 ```
 
-List linked services:
+List attached services:
 
 ```bash
-keyrail current
+keyrail status
 ```
 
 ## 8. Advanced: Staging and Production
@@ -150,7 +150,7 @@ Link service keys per context:
 
 ```bash
 keyrail context use production
-keyrail link vercel acme-vercel-prod
+keyrail attach vercel acme-vercel-prod
 ```
 
 High-risk contexts require confirmation unless you explicitly pass:

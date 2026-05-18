@@ -12,7 +12,7 @@ Use this skill whenever you are working in a local repository that may need proj
 1. Run:
 
    ```bash
-   keyrail current --json
+   keyrail status --json
    ```
 
 2. If the project is verified, use:
@@ -28,13 +28,13 @@ Use this skill whenever you are working in a local repository that may need proj
 4. If a service is missing, tell the user:
 
    ```bash
-   keyrail link <service> <reference>
+   keyrail attach <service> <name>
    ```
 
-5. If a key value is not configured, tell the user to configure the referenced key through their chosen backend or:
+5. If a key value is not configured, tell the user to configure the named account through their chosen backend or:
 
    ```bash
-   keyrail link <service> <reference> --value <secret>
+   keyrail attach <service> <name> --value <secret>
    ```
 
 6. If project identity is not verified, stop and ask the user to run:
@@ -47,36 +47,36 @@ Use this skill whenever you are working in a local repository that may need proj
 
 If the user asks you to clone a private GitHub repository and normal `git clone` fails or would require a PAT:
 
-1. Check whether a GitHub bootstrap profile exists:
+1. Check whether a GitHub account exists:
 
    ```bash
-   keyrail profile list
+   keyrail auth list
    ```
 
-2. If no GitHub profile exists, ask the user to configure one:
+2. If no GitHub account exists, ask the user to configure one:
 
    ```bash
-   keyrail profile set github <reference> --value-stdin
+   keyrail auth add github <name> --value-stdin
    ```
 
 3. Run the normal clone command through Keyrail's service credential environment:
 
    ```bash
-   keyrail use github -- gh repo clone <owner/repo>
+   keyrail with github <name> -- gh repo clone <owner/repo>
    ```
 
    If `gh` is not available, use:
 
    ```bash
-   keyrail use github -- git clone https://github.com/<owner>/<repo>.git
+   keyrail with github <name> -- git clone https://github.com/<owner>/<repo>.git
    ```
 
 4. After the repository is local, initialize and bind the project:
 
    ```bash
    keyrail init --repo git@github.com:<owner>/<repo>.git
-   keyrail link github <reference>
-   keyrail current --json
+   keyrail attach github <name>
+   keyrail status --json
    ```
 
 Keyrail provides the configured GitHub credential to the child process without putting the token in the remote URL.

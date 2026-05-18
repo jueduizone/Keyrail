@@ -38,27 +38,27 @@ keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
 
 ## 2. 可选：先 clone 私有仓库
 
-如果私有仓库还没有在本地，项目级 Keyrail 配置还不存在，所以不能靠 repo 内 manifest 判断应该用哪个 PAT。先配置用户级 GitHub bootstrap profile，再通过 Keyrail 执行正常 clone 命令：
+如果私有仓库还没有在本地，项目级 Keyrail 配置还不存在，所以不能靠 repo 内 manifest 判断应该用哪个 PAT。先保存一个用户级 GitHub 账号，再通过 Keyrail 执行正常 clone 命令：
 
 ```bash
-keyrail profile set github personal-github --value-stdin
-keyrail use github -- gh repo clone acme/private-repo
+keyrail auth add github personal --value-stdin
+keyrail with github personal -- gh repo clone acme/private-repo
 cd private-repo
 keyrail init --repo git@github.com:acme/private-repo.git
-keyrail link github personal-github
+keyrail attach github personal
 ```
 
-建议用 `--value-stdin`，避免 PAT 留在 shell history。Git remote 会保持普通 GitHub URL，不包含 token。如果没有安装 `gh`，可以用 `keyrail use github -- git clone https://github.com/acme/private-repo.git`。
+建议用 `--value-stdin`，避免 PAT 留在 shell history。Git remote 会保持普通 GitHub URL，不包含 token。如果没有安装 `gh`，可以用 `keyrail with github personal -- git clone https://github.com/acme/private-repo.git`。
 
 ## 3. 绑定服务 Key
 
 绑定这个工程会用到的服务：
 
 ```bash
-keyrail link github acme-github-token
-keyrail link vercel acme-vercel-token
-keyrail link supabase acme-supabase-token
-keyrail link openai acme-openai-dev
+keyrail attach github acme-github-token
+keyrail attach vercel acme-vercel-token
+keyrail attach supabase acme-supabase-token
+keyrail attach openai acme-openai-dev
 ```
 
 这些是引用名，可以安全保存在 `.agent-context.yaml` 里。
@@ -66,7 +66,7 @@ keyrail link openai acme-openai-dev
 如果想让 Keyrail 保存本地开发值：
 
 ```bash
-keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
+keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
 ```
 
 本地值会写入 `.keyrail/secrets.local.json`，这个文件不应该进 git。
@@ -74,7 +74,7 @@ keyrail link openai acme-openai-dev --value "$OPENAI_API_KEY"
 ## 4. 查看 Agent 能看到什么
 
 ```bash
-keyrail current --json
+keyrail status --json
 ```
 
 输出会告诉 Agent：
@@ -120,20 +120,20 @@ keyrail ui
 
 ```bash
 export VERCEL_TOKEN=...
-keyrail link vercel acme-vercel-token
+keyrail attach vercel acme-vercel-token
 keyrail run -- vercel deploy
 ```
 
 移除服务绑定：
 
 ```bash
-keyrail unlink vercel
+keyrail detach vercel
 ```
 
 查看已绑定服务：
 
 ```bash
-keyrail current
+keyrail status
 ```
 
 ## 8. 高级：Staging 和 Production
@@ -150,7 +150,7 @@ keyrail context use staging
 
 ```bash
 keyrail context use production
-keyrail link vercel acme-vercel-prod
+keyrail attach vercel acme-vercel-prod
 ```
 
 high-risk context 默认需要确认。自动化场景可以显式传入：
