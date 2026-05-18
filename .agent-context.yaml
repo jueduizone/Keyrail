@@ -1,0 +1,19 @@
+project:
+  id: keyrail
+  name: Keyrail
+  repo: local
+  default_context: local
+contexts:
+  local:
+    risk: low
+    secrets: {}
+policy:
+  allow:
+    - gh issue list
+    - vercel deploy
+    - supabase db push
+  require_confirm:
+    - vercel deploy --prod
+    - supabase db reset
+  deny:
+    - gh repo delete

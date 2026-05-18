@@ -1,0 +1,13 @@
+{
+  "name": "@keyrail/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "keyrail": "bin/keyrail.js"
+  },
+  "dependencies": {
+    "@keyrail/backends": "0.1.0",
+    "@keyrail/core": "0.1.0",
+    "@keyrail/policy": "0.1.0"
+  }
+}

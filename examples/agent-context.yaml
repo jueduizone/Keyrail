@@ -1,0 +1,29 @@
+project:
+  id: keyrail
+  name: Keyrail
+  repo: local
+  default_context: local
+
+contexts:
+  local:
+    risk: low
+    secrets:
+      github: keyrail-github-readonly
+      openai: keyrail-openai-dev
+
+  production:
+    risk: high
+    require_confirmation: true
+    secrets:
+      github: keyrail-github-release
+
+policy:
+  allow:
+    - gh issue list
+    - vercel deploy
+    - supabase db push
+  require_confirm:
+    - vercel deploy --prod
+    - supabase db reset
+  deny:
+    - gh repo delete
