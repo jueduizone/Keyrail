@@ -59,13 +59,27 @@ If the user asks you to clone a private GitHub repository and normal `git clone`
    keyrail profile set github <reference> --value-stdin
    ```
 
-3. Clone through Keyrail:
+3. Run the normal clone command through Keyrail's service credential environment:
 
    ```bash
-   keyrail clone github <owner/repo> [directory]
+   keyrail use github -- gh repo clone <owner/repo>
    ```
 
-Keyrail uses the configured GitHub profile for the clone without putting the token in the remote URL.
+   If `gh` is not available, use:
+
+   ```bash
+   keyrail use github -- git clone https://github.com/<owner>/<repo>.git
+   ```
+
+4. After the repository is local, initialize and bind the project:
+
+   ```bash
+   keyrail init --repo git@github.com:<owner>/<repo>.git
+   keyrail link github <reference>
+   keyrail current --json
+   ```
+
+Keyrail provides the configured GitHub credential to the child process without putting the token in the remote URL.
 
 ## Output Rules
 

@@ -38,17 +38,17 @@ keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
 
 ## 2. 可选：先 clone 私有仓库
 
-如果私有仓库还没有在本地，项目级 Keyrail 配置还不存在，所以不能靠 repo 内 manifest 判断应该用哪个 PAT。先配置用户级 GitHub bootstrap profile，再通过 Keyrail clone：
+如果私有仓库还没有在本地，项目级 Keyrail 配置还不存在，所以不能靠 repo 内 manifest 判断应该用哪个 PAT。先配置用户级 GitHub bootstrap profile，再通过 Keyrail 执行正常 clone 命令：
 
 ```bash
 keyrail profile set github personal-github --value-stdin
-keyrail clone github acme/private-repo
+keyrail use github -- gh repo clone acme/private-repo
 cd private-repo
 keyrail init --repo git@github.com:acme/private-repo.git
 keyrail link github personal-github
 ```
 
-建议用 `--value-stdin`，避免 PAT 留在 shell history。Git remote 会保持普通 GitHub URL，不包含 token。
+建议用 `--value-stdin`，避免 PAT 留在 shell history。Git remote 会保持普通 GitHub URL，不包含 token。如果没有安装 `gh`，可以用 `keyrail use github -- git clone https://github.com/acme/private-repo.git`。
 
 ## 3. 绑定服务 Key
 

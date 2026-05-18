@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { getStateForUi, normalizeGithubRepoUrl, renderUiHtml } from "../packages/cli/src/cli.js";
+import { getStateForUi, renderUiHtml } from "../packages/cli/src/cli.js";
 
 const CLI = path.resolve("packages/cli/bin/keyrail.js");
 
@@ -148,18 +148,30 @@ test("profile set accepts secret values from stdin", async () => {
   assert.equal(secrets["stdin-github"], "DUMMY_STDIN_GITHUB_TOKEN");
 });
 
-test("github clone urls normalize without embedding tokens", () => {
-  assert.equal(normalizeGithubRepoUrl("acme/private-repo"), "https://github.com/acme/private-repo.git");
-  assert.equal(normalizeGithubRepoUrl("acme/private-repo.git"), "https://github.com/acme/private-repo.git");
-  assert.equal(normalizeGithubRepoUrl("git@github.com:acme/private-repo.git"), "git@github.com:acme/private-repo.git");
-  assert.equal(normalizeGithubRepoUrl("https://github.com/acme/private-repo.git"), "https://github.com/acme/private-repo.git");
+test("use injects a configured service key into a normal child command", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-use-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-use-home-"));
+
+  const set = run(["profile", "set", "github", "personal-github", "--value", "DUMMY_USE_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(set.status, 0, set.stderr);
+
+  const result = run(["use", "github", "--", "node", "-e", "console.log(process.env.GITHUB_TOKEN); console.error(process.env.GH_TOKEN)"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[REDACTED\]/);
+  assert.match(result.stderr, /\[REDACTED\]/);
+  assert.doesNotMatch(result.stdout, /DUMMY_USE_GITHUB_TOKEN/);
+  assert.doesNotMatch(result.stderr, /DUMMY_USE_GITHUB_TOKEN/);
 });
 
 test("agent skill documents current state and private repo bootstrap", async () => {
   const skill = await readFile(path.resolve("agents/keyrail/SKILL.md"), "utf8");
   await stat(path.resolve("docs/agent/README.md"));
   assert.match(skill, /keyrail current --json/);
-  assert.match(skill, /keyrail clone github/);
+  assert.match(skill, /keyrail use github/);
   assert.match(skill, /Never read, print, or copy raw secret values/);
 });
 

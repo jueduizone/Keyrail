@@ -38,17 +38,17 @@ For local testing, `repo: local` is fine.
 
 ## 2. Optional: Clone a Private Repo First
 
-If the private repo is not on disk yet, project-level Keyrail config cannot help because the project does not exist locally. Configure a user-level GitHub bootstrap profile, then clone through Keyrail:
+If the private repo is not on disk yet, project-level Keyrail config cannot help because the project does not exist locally. Configure a user-level GitHub bootstrap profile, then run the normal clone command through Keyrail:
 
 ```bash
 keyrail profile set github personal-github --value-stdin
-keyrail clone github acme/private-repo
+keyrail use github -- gh repo clone acme/private-repo
 cd private-repo
 keyrail init --repo git@github.com:acme/private-repo.git
 keyrail link github personal-github
 ```
 
-Use `--value-stdin` so the PAT is not part of shell history. The Git remote remains a normal GitHub URL without the token.
+Use `--value-stdin` so the PAT is not part of shell history. The Git remote remains a normal GitHub URL without the token. If `gh` is not available, use `keyrail use github -- git clone https://github.com/acme/private-repo.git`.
 
 ## 3. Link Service Keys
 

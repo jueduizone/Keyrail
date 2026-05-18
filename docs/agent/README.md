@@ -29,14 +29,20 @@ for service commands.
 
 ## Before a Private Repository Is Cloned
 
-When a repo does not exist locally yet, project-level Keyrail manifests are not available. Use a user-level bootstrap profile:
+When a repo does not exist locally yet, project-level Keyrail manifests are not available. Use a user-level bootstrap profile, then run the normal clone command through Keyrail:
 
 ```bash
 keyrail profile set github personal-github --value-stdin
-keyrail clone github owner/private-repo
+keyrail use github -- gh repo clone owner/private-repo
 ```
 
-This avoids placing the PAT in shell history or the remote URL.
+This avoids placing the PAT in shell history or the remote URL. After cloning, initialize the project and bind the GitHub reference:
+
+```bash
+keyrail init --repo git@github.com:owner/private-repo.git
+keyrail link github personal-github
+keyrail current --json
+```
 
 ## Future MCP Tools
 
@@ -44,8 +50,8 @@ Planned tools:
 
 - `keyrail.current`
 - `keyrail.list_services`
-- `keyrail.clone`
+- `keyrail.use`
 - `keyrail.run`
 - `keyrail.handoff`
 
-The default MCP mode should expose read-only tools first. `run` and `clone` should require explicit enablement.
+The default MCP mode should expose read-only tools first. `run` and `use` should require explicit enablement.
