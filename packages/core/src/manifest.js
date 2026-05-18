@@ -11,6 +11,7 @@ export async function findProjectRoot(startDir = process.cwd()) {
   while (true) {
     if (await exists(path.join(current, MANIFEST_FILE))) return current;
     if (await exists(path.join(current, ".git"))) return current;
+    if (await exists(path.join(current, "package.json"))) return current;
 
     const parent = path.dirname(current);
     if (parent === current) return path.resolve(startDir);

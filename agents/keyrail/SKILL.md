@@ -49,11 +49,7 @@ Use this skill whenever you are working in a local repository that may need proj
    keyrail attach <service> <name> --value <secret>
    ```
 
-6. If project identity is not verified, stop and ask the user to run:
-
-   ```bash
-   keyrail init
-   ```
+6. If project identity is not verified, do not ask for raw secrets. Report the mismatch and ask the user which local project/account binding should be used. `keyrail status --json` works without project init, and `keyrail attach <service> <name>` stores routing in the user's local Keyrail config by default.
 
 ## Private Repository Not Yet Cloned
 
@@ -83,15 +79,14 @@ If the user asks you to clone a private GitHub repository and normal `git clone`
    keyrail with github <name> -- git clone https://github.com/<owner>/<repo>.git
    ```
 
-4. After the repository is local, initialize and bind the project:
+4. After the repository is local, attach the GitHub account to that local project:
 
    ```bash
-   keyrail init --repo git@github.com:<owner>/<repo>.git
    keyrail attach github <name>
    keyrail status --json
    ```
 
-Keyrail provides the configured GitHub credential to the child process without putting the token in the remote URL.
+Keyrail provides the configured GitHub credential to the child process without putting the token in the remote URL. The project binding is stored in the user's local Keyrail config by default; do not create repo files unless the user explicitly asks for manifest mode.
 
 ## Output Rules
 

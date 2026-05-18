@@ -4,55 +4,57 @@
 
 [中文文档](README.zh-CN.md) · [Tutorial](docs/tutorial.md) · [中文教程](docs/tutorial.zh-CN.md)
 
-Keyrail is a local project credential router for coding agents. If you have many local projects and each project uses different GitHub, Vercel, Supabase, OpenAI, Anthropic, or Stripe keys, Keyrail gives the agent a simple rule:
+Keyrail is a local credential router for coding agents. If one machine has many projects, and each project uses different GitHub, Vercel, Supabase, OpenAI, Anthropic, Stripe, or other service keys, Keyrail gives agents one simple rule:
 
-> First identify the current project. Then use only the keys linked to that project.
+> Identify the current local project, then use only the service accounts attached to that project.
 
-It is not a full secret manager. It is the local layer that binds a repo to service credentials and injects the right values when a command runs.
+Keyrail is not a full secret manager. It is the local routing layer between a repo, named service accounts, and the commands an agent runs.
 
-## The Simple Flow
+## Simple Flow
+
+No project init is required by default. Keyrail stores project routing in the user's Keyrail config, not in the repo.
 
 ```bash
 cd my-project
 
-keyrail init
-keyrail attach github my-project-github-token
-keyrail attach vercel my-project-vercel-token
-keyrail attach supabase my-project-supabase-token
+keyrail auth add github personal --value-stdin
+keyrail attach github personal
+keyrail attach vercel my-project-vercel
+keyrail attach supabase my-project-supabase
 
 keyrail status --json
 keyrail run -- vercel deploy
 ```
 
-For a beginner-friendly view:
+For a beginner-friendly local manager:
 
 ```bash
 keyrail ui
 ```
 
-The UI shows the current project, linked services, whether each key is configured, and the command agents should use: `keyrail run -- <command>`.
+The UI shows the current project, linked services, whether each key is configured, recent audit entries, and the command agents should use: `keyrail run -- <command>`.
 
 ## Why This Exists
 
-Agents are good at coding, but local machines are messy:
+Agents are good at coding, but local credential context is often ambiguous:
 
 - one machine has many repos
 - each repo may use a different GitHub account or token
 - one project may deploy to a different Vercel team
 - Supabase, Stripe, OpenAI, and Anthropic keys differ per project
-- an agent can accidentally use the wrong credential if the environment is ambiguous
+- an agent can accidentally use the wrong credential if it only guesses from the shell environment
 
-Keyrail removes that ambiguity.
+Keyrail removes that ambiguity without requiring every repo collaborator to use Keyrail.
 
 ## What Keyrail Does
 
-- Detects the current project.
-- Reads the project identity from `.agent-context.yaml`.
+- Detects the current project from Git/package/local directory signals.
+- Stores project-to-account routing in local user config by default.
 - Shows linked services such as GitHub, Vercel, Supabase, OpenAI, and Stripe.
-- Resolves attached service account names from a local backend or environment variables.
+- Resolves named service accounts from user-level storage, project-local storage, or environment variables.
 - Injects keys only into the child process launched by `keyrail run`.
 - Redacts command output.
-- Gives agents JSON output through `status --json`.
+- Gives agents structured context through `status --json`.
 - Provides a local UI for non-technical users.
 
 ## Install
@@ -61,33 +63,34 @@ From this repository:
 
 ```bash
 npm install
-npm run keyrail -- current
+npm run keyrail -- status
 ```
 
 After npm publishing:
 
 ```bash
 npm i -D @keyrail/cli
-npx keyrail init
+npx keyrail status
 ```
 
 ## Main Commands
 
-Initialize a project:
+Save a user-level service account:
 
 ```bash
-keyrail init
+keyrail auth add github personal --value-stdin
+keyrail auth add vercel acme-vercel --value-stdin
 ```
 
-Attach service accounts to the project:
+Attach account names to the current project:
 
 ```bash
-keyrail attach github acme-github-token
-keyrail attach vercel acme-vercel-token
-keyrail attach supabase acme-supabase-token
+keyrail attach github personal
+keyrail attach vercel acme-vercel
+keyrail attach supabase acme-supabase
 ```
 
-Optionally store a local development value:
+You can also attach and store a local value in one step:
 
 ```bash
 keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
@@ -99,7 +102,7 @@ Show the current project in an agent-friendly format:
 keyrail status --json
 ```
 
-Run commands with the project’s linked keys:
+Run commands with the project's linked keys:
 
 ```bash
 keyrail run -- gh issue list
@@ -115,13 +118,12 @@ keyrail ui
 
 ## Private Repo Bootstrap
 
-If the private repository is not cloned yet, there is no project manifest for the agent to read. Save a user-level GitHub account first, then let the agent run the normal GitHub command through Keyrail:
+If a private repository is not cloned yet, save a user-level GitHub account first, then let the agent run the normal GitHub command through Keyrail:
 
 ```bash
 keyrail auth add github personal --value-stdin
 keyrail with github personal -- gh repo clone owner/private-repo
 cd private-repo
-keyrail init --repo git@github.com:owner/private-repo.git
 keyrail attach github personal
 keyrail status --json
 ```
@@ -143,15 +145,7 @@ Tell agents to start with:
 keyrail status --json
 ```
 
-The response includes:
-
-- project id and name
-- verified identity signals
-- active context
-- linked services
-- env var names
-- whether each key is configured
-- the instruction to use `keyrail run -- <command>`
+The response includes project identity, active context, linked services, env var names, configured/missing status, and the instruction to use `keyrail run -- <command>`.
 
 Example:
 
@@ -178,49 +172,35 @@ Example:
 
 ## Local UI
 
-`keyrail ui` starts a local browser manager for users who do not want to edit YAML.
+`keyrail ui` starts a local browser manager for users who do not want to edit JSON or YAML.
 
 It shows:
 
 - current project
+- where routing is stored
 - active context
 - linked services
 - ready vs account-name-only keys
 - agent command guidance
-- advanced manifest and audit views
+- project config and audit views
 
 The UI binds to `127.0.0.1` and prints a tokenized URL.
 
-## Manifest
+## Storage Model
 
-Keyrail stores project routing in `.agent-context.yaml`.
+Default mode is zero-intrusion:
 
-```yaml
-project:
-  id: acme-web
-  name: Acme Web
-  repo: local
-  default_context: local
+- no `keyrail init` required
+- no `.agent-context.yaml` written to the project
+- no `.ctx/` written to the project
+- no `.keyrail/` written to the project
+- project routing is stored under the user's Keyrail config, keyed by local project path
 
-contexts:
-  local:
-    risk: low
-    secrets:
-      github: acme-github-token
-      vercel: acme-vercel-token
-      supabase: acme-supabase-token
-      openai: acme-openai-dev
+This keeps Keyrail local-private and avoids assuming collaborators also use Keyrail.
 
-policy:
-  allow:
-    - gh issue list
-    - vercel deploy
-    - supabase db push
-  require_confirm:
-    - vercel deploy --prod
-  deny:
-    - gh repo delete
-```
+## Optional Project Manifest
+
+For advanced local workflows, `keyrail init` writes `.agent-context.yaml` and `.ctx/lock.yaml`. Keyrail now adds `.agent-context.yaml`, `.keyrail/`, and `.ctx/` to `.gitignore` when you explicitly initialize this mode.
 
 The manifest stores account names, not raw secret values.
 
@@ -228,7 +208,8 @@ The manifest stores account names, not raw secret values.
 
 Keyrail currently supports:
 
-- local development file: `.keyrail/secrets.local.json`
+- user-level local storage through `keyrail auth add`
+- project-local development files when explicit manifest mode is used
 - environment variables such as `VERCEL_TOKEN`, `GITHUB_TOKEN`, `SUPABASE_ACCESS_TOKEN`, `OPENAI_API_KEY`
 
 Future adapters can support 1Password, Infisical, macOS Keychain, Vault, or other secret stores. They are optional adapters, not required for the core workflow.
@@ -254,8 +235,4 @@ npm run check
 npm_config_cache=/private/tmp/keyrail-npm-cache npm run pack:dry-run
 ```
 
-## Status
-
 Current version: `0.1.0`.
-
-The repository is ready for npm publishing once package ownership and npm credentials are configured.

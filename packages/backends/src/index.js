@@ -29,22 +29,29 @@ export class LocalFileSecretBackend {
 
   async listReferences(references) {
     const store = await this.readStore();
-    return Object.entries(references ?? {}).map(([provider, reference]) => ({
-      provider,
-      reference,
-      envName: envNameForProvider(provider),
-      configured: Object.prototype.hasOwnProperty.call(store, reference)
-    }));
+    const globalStore = await new GlobalSecretStore().readStore();
+    return Object.entries(references ?? {}).map(([provider, reference]) => {
+      const envName = envNameForProvider(provider);
+      return {
+        provider,
+        reference,
+        envName,
+        configured: Object.prototype.hasOwnProperty.call(store, reference) ||
+          Object.prototype.hasOwnProperty.call(globalStore, reference) ||
+          Boolean(process.env[envName])
+      };
+    });
   }
 
   async resolveReferences(references) {
     const store = await this.readStore();
+    const globalStore = await new GlobalSecretStore().readStore();
     const env = {};
     const resolved = [];
     const missing = [];
 
     for (const [provider, reference] of Object.entries(references ?? {})) {
-      const value = store[reference] ?? process.env[envNameForProvider(provider)] ?? null;
+      const value = store[reference] ?? globalStore[reference] ?? process.env[envNameForProvider(provider)] ?? null;
       if (!value) {
         missing.push({ provider, reference });
         continue;

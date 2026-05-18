@@ -4,21 +4,23 @@
 
 [English](README.md) · [中文教程](docs/tutorial.zh-CN.md) · [Tutorial](docs/tutorial.md)
 
-Keyrail 是一个本地项目凭据路由器。你可能在一台电脑上有很多工程，每个工程使用不同的 GitHub、Vercel、Supabase、OpenAI、Anthropic 或 Stripe key。Keyrail 给 Agent 一个简单规则：
+Keyrail 是一个本地凭据路由器。你可能在一台电脑上有很多工程，每个工程使用不同的 GitHub、Vercel、Supabase、OpenAI、Anthropic、Stripe 或其他服务 key。Keyrail 给 Agent 一个简单规则：
 
-> 先识别当前工程，再只使用这个工程绑定的 key。
+> 先识别当前本地工程，再只使用这个工程绑定的服务账号。
 
-它不是完整的 secret manager。它负责把“本地 repo”和“这个 repo 应该使用哪些服务凭据”绑定起来，并在执行命令时注入正确的值。
+它不是完整的 secret manager。它负责把“本地 repo”“服务账号引用”和“Agent 执行的命令”连接起来。
 
-## 最简单的使用流程
+## 最简单的流程
+
+默认不需要在项目里 init。Keyrail 会把项目路由保存在用户自己的 Keyrail 配置里，不写入 repo。
 
 ```bash
 cd my-project
 
-keyrail init
-keyrail attach github my-project-github-token
-keyrail attach vercel my-project-vercel-token
-keyrail attach supabase my-project-supabase-token
+keyrail auth add github personal --value-stdin
+keyrail attach github personal
+keyrail attach vercel my-project-vercel
+keyrail attach supabase my-project-supabase
 
 keyrail status --json
 keyrail run -- vercel deploy
@@ -30,26 +32,26 @@ keyrail run -- vercel deploy
 keyrail ui
 ```
 
-UI 会展示当前工程、绑定了哪些服务、每个 key 是否已经配置，以及 Agent 应该使用的命令：`keyrail run -- <command>`。
+UI 会展示当前工程、绑定了哪些服务、每个 key 是否已经配置、最近 audit，以及 Agent 应该使用的命令：`keyrail run -- <command>`。
 
 ## 为什么需要 Keyrail
 
-Agent 很会写代码，但本地环境经常很混乱：
+Agent 很会写代码，但本地凭据上下文经常很混乱：
 
 - 一台机器上有很多 repo
 - 每个 repo 可能使用不同的 GitHub token
 - 不同项目可能部署到不同 Vercel team
 - Supabase、Stripe、OpenAI、Anthropic 的 key 都可能按项目区分
-- Agent 如果只靠猜，很容易用错 key
+- Agent 如果只靠 shell 环境猜，很容易用错 key
 
-Keyrail 的目标就是消除这种歧义。
+Keyrail 的目标是消除这种歧义，同时不要求协作者也必须安装 Keyrail。
 
 ## Keyrail 做什么
 
-- 识别当前项目
-- 从 `.agent-context.yaml` 读取项目身份
+- 通过 Git、package、本地目录等信号识别当前项目
+- 默认把项目到账号的路由保存在本机用户配置中
 - 展示已绑定服务，例如 GitHub、Vercel、Supabase、OpenAI、Stripe
-- 从本地 backend 或环境变量解析 key 引用
+- 从用户级存储、项目本地存储或环境变量解析服务账号引用
 - 只在 `keyrail run` 启动的子进程中注入 key
 - 对命令输出做脱敏
 - 通过 `status --json` 给 Agent 结构化上下文
@@ -61,33 +63,34 @@ Keyrail 的目标就是消除这种歧义。
 
 ```bash
 npm install
-npm run keyrail -- current
+npm run keyrail -- status
 ```
 
 发布到 npm 后：
 
 ```bash
 npm i -D @keyrail/cli
-npx keyrail init
+npx keyrail status
 ```
 
 ## 主命令
 
-初始化：
+保存用户级服务账号：
 
 ```bash
-keyrail init
+keyrail auth add github personal --value-stdin
+keyrail auth add vercel acme-vercel --value-stdin
 ```
 
-绑定服务 key 引用：
+把账号引用绑定到当前项目：
 
 ```bash
-keyrail attach github acme-github-token
-keyrail attach vercel acme-vercel-token
-keyrail attach supabase acme-supabase-token
+keyrail attach github personal
+keyrail attach vercel acme-vercel
+keyrail attach supabase acme-supabase
 ```
 
-也可以保存一个本地开发值：
+也可以绑定并同时保存本地值：
 
 ```bash
 keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
@@ -115,13 +118,12 @@ keyrail ui
 
 ## 私有仓库 Bootstrap
 
-如果私有仓库还没有 clone 到本地，这时 repo 里还没有 `.agent-context.yaml`，Agent 也就无法从项目配置里判断应该用哪个 GitHub PAT。先保存一个用户级 GitHub 账号，然后让 Agent 通过 Keyrail 执行正常 GitHub 命令：
+如果私有仓库还没有 clone 到本地，先保存一个用户级 GitHub 账号，然后让 Agent 通过 Keyrail 执行正常 GitHub 命令：
 
 ```bash
 keyrail auth add github personal --value-stdin
 keyrail with github personal -- gh repo clone owner/private-repo
 cd private-repo
-keyrail init --repo git@github.com:owner/private-repo.git
 keyrail attach github personal
 keyrail status --json
 ```
@@ -143,15 +145,7 @@ keyrail run -- gh repo view
 keyrail status --json
 ```
 
-返回内容会包含：
-
-- project id 和 name
-- 已验证的身份信号
-- active context
-- 已绑定服务
-- 对应环境变量名
-- 每个 key 是否已配置
-- 提示 Agent 使用 `keyrail run -- <command>`
+返回内容会包含项目身份、active context、已绑定服务、对应环境变量名、key 是否已配置，以及提示 Agent 使用 `keyrail run -- <command>`。
 
 示例：
 
@@ -178,57 +172,44 @@ keyrail status --json
 
 ## 本地 UI
 
-`keyrail ui` 会启动一个本地浏览器管理界面，适合不想编辑 YAML 的用户。
+`keyrail ui` 会启动一个本地浏览器管理界面，适合不想编辑 JSON 或 YAML 的用户。
 
 它会展示：
 
 - 当前工程
+- 路由保存位置
 - active context
 - 已绑定服务
 - key 是否 ready
 - Agent 命令提示
-- 高级 manifest 和 audit 视图
+- 项目配置和 audit 视图
 
 UI 默认绑定 `127.0.0.1`，启动时会输出带 token 的 URL。
 
-## Manifest
+## 存储模型
 
-Keyrail 把项目路由信息保存在 `.agent-context.yaml`。
+默认是零侵入模式：
 
-```yaml
-project:
-  id: acme-web
-  name: Acme Web
-  repo: local
-  default_context: local
+- 不需要 `keyrail init`
+- 不会在项目里写 `.agent-context.yaml`
+- 不会在项目里写 `.ctx/`
+- 不会在项目里写 `.keyrail/`
+- 项目路由按本地项目路径保存在用户自己的 Keyrail 配置中
 
-contexts:
-  local:
-    risk: low
-    secrets:
-      github: acme-github-token
-      vercel: acme-vercel-token
-      supabase: acme-supabase-token
-      openai: acme-openai-dev
+这样 Keyrail 是本地私有的，不会假设协作者也在使用 Keyrail。
 
-policy:
-  allow:
-    - gh issue list
-    - vercel deploy
-    - supabase db push
-  require_confirm:
-    - vercel deploy --prod
-  deny:
-    - gh repo delete
-```
+## 可选项目 Manifest
 
-manifest 保存的是引用，不保存明文 key。
+高级本地工作流可以显式执行 `keyrail init`，它会写入 `.agent-context.yaml` 和 `.ctx/lock.yaml`。现在只有在显式 init 时，Keyrail 才会把 `.agent-context.yaml`、`.keyrail/`、`.ctx/` 加入 `.gitignore`。
+
+manifest 保存的是账号引用名，不保存明文 key。
 
 ## Secret 值
 
 当前支持：
 
-- 本地开发文件：`.keyrail/secrets.local.json`
+- 通过 `keyrail auth add` 保存用户级本地值
+- 显式 manifest 模式下的项目本地开发文件
 - 环境变量：`VERCEL_TOKEN`、`GITHUB_TOKEN`、`SUPABASE_ACCESS_TOKEN`、`OPENAI_API_KEY`
 
 未来可以用 adapter 接入 1Password、Infisical、macOS Keychain、Vault 等，但它们不是核心流程的强依赖。

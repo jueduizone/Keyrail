@@ -3,7 +3,7 @@
 Local-first project identity and credential routing for agent-assisted development.
 
 ```bash
-npx @keyrail/cli init
+npx @keyrail/cli attach github personal
 npx @keyrail/cli status
 npx @keyrail/cli ui
 ```

@@ -1,6 +1,6 @@
 # Keyrail Tutorial
 
-This tutorial shows the simplest Keyrail workflow: attach service accounts to a local project, then make agents run commands through Keyrail.
+This tutorial shows the default Keyrail workflow: attach service accounts to a local project without writing project files, then make agents run commands through Keyrail.
 
 ## Goal
 
@@ -11,43 +11,29 @@ You have a project that uses:
 - Supabase
 - OpenAI
 
-You want a local agent to use this project’s keys, not keys from another repo.
+You want a local agent to use this project's keys, not keys from another repo.
 
-## 1. Initialize Keyrail
+## 1. Enter the Project
 
 From the project root:
 
 ```bash
-keyrail init
+cd acme-web
+keyrail status --json
 ```
 
-This creates:
-
-```text
-.agent-context.yaml
-.ctx/lock.yaml
-```
-
-`.agent-context.yaml` is project routing and can be committed. `.ctx/lock.yaml` is local active-context state and should stay out of git.
-
-For a real GitHub repository, bind the remote explicitly:
-
-```bash
-keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
-```
-
-For local testing, `repo: local` is fine.
+No `keyrail init` is required. If no Keyrail config exists yet, Keyrail creates an in-memory default from the current Git/package/directory identity. It only writes user-level project routing after you attach a service, change context, or edit policy.
 
 ## 2. Optional: Clone a Private Repo First
 
-If the private repo is not on disk yet, project-level Keyrail config cannot help because the project does not exist locally. Save a user-level GitHub account, then run the normal clone command through Keyrail:
+If the private repo is not on disk yet, save a user-level GitHub account, then run the normal clone command through Keyrail:
 
 ```bash
 keyrail auth add github personal --value-stdin
 keyrail with github personal -- gh repo clone acme/private-repo
 cd private-repo
-keyrail init --repo git@github.com:acme/private-repo.git
 keyrail attach github personal
+keyrail status --json
 ```
 
 Use `--value-stdin` so the PAT is not part of shell history. The Git remote remains a normal GitHub URL without the token. If `gh` is not available, use `keyrail with github personal -- git clone https://github.com/acme/private-repo.git`.
@@ -57,13 +43,13 @@ Use `--value-stdin` so the PAT is not part of shell history. The Git remote rema
 Attach the services this project uses:
 
 ```bash
-keyrail attach github acme-github-token
+keyrail attach github personal
 keyrail attach vercel acme-vercel-token
 keyrail attach supabase acme-supabase-token
 keyrail attach openai acme-openai-dev
 ```
 
-These account names are safe to store in `.agent-context.yaml`.
+These account names are local references. In the default mode they are stored in the user's Keyrail config, not in the project repository.
 
 If you want Keyrail to store a local development value:
 
@@ -71,7 +57,7 @@ If you want Keyrail to store a local development value:
 keyrail attach openai acme-openai-dev --value "$OPENAI_API_KEY"
 ```
 
-Local values are written to `.keyrail/secrets.local.json`, which should stay out of git.
+In zero-init mode, local values are written to the user-level Keyrail store.
 
 ## 4. Check What the Agent Sees
 
@@ -108,11 +94,12 @@ keyrail ui
 Open the printed URL. The UI shows:
 
 - current project
+- where project routing is stored
 - active context
 - linked services
 - ready vs account-name-only keys
 - the agent command pattern
-- advanced manifest and audit views
+- project config and audit views
 
 This is the easiest path for non-technical users.
 
@@ -161,7 +148,17 @@ High-risk contexts require confirmation unless you explicitly pass:
 KEYRAIL_CONFIRM=1 keyrail run --context production -- vercel deploy --prod
 ```
 
-## 9. Advanced: Policy and Audit
+## 9. Advanced: Optional Project Manifest
+
+If you explicitly want repo-local Keyrail files for a personal workflow:
+
+```bash
+keyrail init --id acme-web --name "Acme Web" --repo git@github.com:acme/web.git
+```
+
+This creates `.agent-context.yaml` and `.ctx/lock.yaml`. Keyrail adds `.agent-context.yaml`, `.keyrail/`, and `.ctx/` to `.gitignore` when this mode is initialized. The manifest stores account names, not raw secret values.
+
+## 10. Advanced: Policy and Audit
 
 Allow expected commands:
 
@@ -183,7 +180,7 @@ keyrail audit list
 keyrail audit list --json
 ```
 
-## 10. Handoff to Another Agent
+## 11. Handoff to Another Agent
 
 ```bash
 keyrail handoff --json

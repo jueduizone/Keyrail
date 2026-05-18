@@ -43,20 +43,21 @@ If no account exists, ask the user to add one with `--value-stdin` rather than p
 
 ## Before a Private Repository Is Cloned
 
-When a repo does not exist locally yet, project-level Keyrail manifests are not available. Save a user-level GitHub account, then run the normal clone command through Keyrail:
+When a repo does not exist locally yet, save a user-level GitHub account, then run the normal clone command through Keyrail:
 
 ```bash
 keyrail auth add github personal --value-stdin
 keyrail with github personal -- gh repo clone owner/private-repo
 ```
 
-This avoids placing the PAT in shell history or the remote URL. After cloning, initialize the project and attach the GitHub account:
+This avoids placing the PAT in shell history or the remote URL. After cloning, attach the GitHub account to the local project. No project init is required:
 
 ```bash
-keyrail init --repo git@github.com:owner/private-repo.git
 keyrail attach github personal
 keyrail status --json
 ```
+
+Keyrail stores that project routing in the user's local Keyrail config by default, not in the repository.
 
 ## Future MCP Tools
 

@@ -3,14 +3,16 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { GlobalSecretStore, createSecretBackend, envNameForProvider, getKeyrailConfigRoot, redactSecrets } from "@keyrail/backends";
 import {
   KeyrailError,
   MANIFEST_FILE,
+  findProjectRoot,
   getContext,
   identifyProject,
   loadManifest,
+  normalizeManifest,
   removeContext,
   removeSecretReference,
   resolveActiveContextName,
@@ -102,17 +104,18 @@ async function initCommand(flags) {
   };
 
   const manifestPath = await writeManifest(root, manifest);
+  await ensureLocalKeyrailGitignore(root);
   await writeContextLock(root, { project: id, context: defaultContext });
   console.log(`Created ${manifestPath}`);
 }
 
 async function bindCommand(flags) {
-  const loaded = await loadManifest(process.cwd());
+  const loaded = await loadProjectState(process.cwd());
   const identity = await identifyProject(loaded.root, loaded.manifest);
   verifyIdentity(identity, loaded.manifest);
   const contextName = flags.context ?? loaded.manifest.project.defaultContext;
   getContext(loaded.manifest, contextName);
-  await writeContextLock(loaded.root, { project: loaded.manifest.project.id, context: contextName });
+  await writeActiveContext(loaded, contextName);
   console.log(`Bound ${loaded.manifest.project.id} to ${contextName}`);
 }
 
@@ -148,7 +151,7 @@ async function currentCommand(flags) {
 async function identifyCommand(flags) {
   let loaded = null;
   try {
-    loaded = await loadManifest(process.cwd());
+    loaded = await loadProjectState(process.cwd());
   } catch (error) {
     if (error.code !== "MANIFEST_NOT_FOUND") throw error;
   }
@@ -169,7 +172,7 @@ async function doctorCommand(flags) {
 
   try {
     const state = await getVerifiedState(flags.context);
-    checks.push(pass("manifest", `${MANIFEST_FILE} is valid`));
+    checks.push(pass("project", state.source === "user" ? "User-level project routing is valid" : `${MANIFEST_FILE} is valid`));
     checks.push(pass("identity", state.verification.reason));
 
     const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
@@ -205,7 +208,7 @@ async function runCommand(args, flags, passthrough) {
   });
 
   if (!decision.allowed) {
-    await appendAudit(state.root, {
+    await appendAudit(state, {
       at: new Date().toISOString(),
       project: state.manifest.project.id,
       context: state.context.name,
@@ -238,7 +241,7 @@ async function runCommand(args, flags, passthrough) {
   }
 
   const exitCode = await spawnRedacted(command, childEnv, secretValues);
-  await appendAudit(state.root, audit);
+  await appendAudit(state, audit);
   process.exitCode = exitCode;
 }
 
@@ -279,14 +282,17 @@ async function linkCommand(args, flags) {
     throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail attach <service> <name> [--value <secret>]");
   }
 
-  const loaded = await loadManifest(process.cwd());
-  const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+  const loaded = await loadProjectState(process.cwd());
+  const contextName = await resolveProjectContextName(loaded, flags.context);
   setSecretReference(loaded.manifest, contextName, service, reference);
-  await writeManifest(loaded.root, loaded.manifest);
+  await writeProjectState(loaded);
 
   if (flags.value) {
-    const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
-    await backend.set(reference, flags.value);
+    if (loaded.source === "user") await new GlobalSecretStore().set(reference, flags.value);
+    else {
+      const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
+      await backend.set(reference, flags.value);
+    }
   }
 
   console.log(`Linked ${service} to ${reference} for ${loaded.manifest.project.id}/${contextName}`);
@@ -296,15 +302,18 @@ async function unlinkCommand(args, flags) {
   const service = args[0] ?? flags.service;
   if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail detach <service>");
 
-  const loaded = await loadManifest(process.cwd());
-  const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+  const loaded = await loadProjectState(process.cwd());
+  const contextName = await resolveProjectContextName(loaded, flags.context);
   const reference = getContext(loaded.manifest, contextName).secrets[service];
   removeSecretReference(loaded.manifest, contextName, service);
-  await writeManifest(loaded.root, loaded.manifest);
+  await writeProjectState(loaded);
 
   if (flags.deleteValue && reference) {
-    const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
-    if (typeof backend.unset === "function") await backend.unset(reference);
+    if (loaded.source === "user") await new GlobalSecretStore().unset(reference);
+    else {
+      const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
+      if (typeof backend.unset === "function") await backend.unset(reference);
+    }
   }
 
   console.log(`Unlinked ${service} from ${loaded.manifest.project.id}/${contextName}`);
@@ -472,11 +481,14 @@ async function secretsCommand(args, flags) {
     if (!provider || !reference) {
       throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail secrets set <provider> <reference> [--value <value>]");
     }
-    const loaded = await loadManifest(process.cwd());
-    const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+    const loaded = await loadProjectState(process.cwd());
+    const contextName = await resolveProjectContextName(loaded, flags.context);
     setSecretReference(loaded.manifest, contextName, provider, reference);
-    await writeManifest(loaded.root, loaded.manifest);
-    if (value) await secretBackend.set(reference, value);
+    await writeProjectState(loaded);
+    if (value) {
+      if (loaded.source === "user") await new GlobalSecretStore().set(reference, value);
+      else await secretBackend.set(reference, value);
+    }
     console.log(`Set ${provider} reference in ${contextName}`);
     return;
   }
@@ -484,12 +496,15 @@ async function secretsCommand(args, flags) {
   if (subcommand === "unset") {
     const provider = args[1] ?? flags.provider;
     if (!provider) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail secrets unset <provider>");
-    const loaded = await loadManifest(process.cwd());
-    const contextName = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+    const loaded = await loadProjectState(process.cwd());
+    const contextName = await resolveProjectContextName(loaded, flags.context);
     const reference = getContext(loaded.manifest, contextName).secrets[provider];
     removeSecretReference(loaded.manifest, contextName, provider);
-    await writeManifest(loaded.root, loaded.manifest);
-    if (flags.deleteValue && reference && typeof secretBackend.unset === "function") await secretBackend.unset(reference);
+    await writeProjectState(loaded);
+    if (flags.deleteValue && reference) {
+      if (loaded.source === "user") await new GlobalSecretStore().unset(reference);
+      else if (typeof secretBackend.unset === "function") await secretBackend.unset(reference);
+    }
     console.log(`Removed ${provider} reference from ${contextName}`);
     return;
   }
@@ -499,10 +514,10 @@ async function secretsCommand(args, flags) {
 
 async function contextCommand(args, flags) {
   const subcommand = args[0] ?? "list";
-  const loaded = await loadManifest(process.cwd());
+  const loaded = await loadProjectState(process.cwd());
 
   if (subcommand === "list") {
-    const active = await resolveActiveContextName(loaded.root, loaded.manifest, flags.context);
+    const active = await resolveProjectContextName(loaded, flags.context);
     const contexts = Object.values(loaded.manifest.contexts).map((context) => ({
       name: context.name,
       risk: context.risk,
@@ -519,7 +534,7 @@ async function contextCommand(args, flags) {
   if (subcommand === "use") {
     const name = args[1] ?? flags.context;
     getContext(loaded.manifest, name);
-    await writeContextLock(loaded.root, { project: loaded.manifest.project.id, context: name });
+    await writeActiveContext(loaded, name);
     console.log(`Using context ${name}`);
     return;
   }
@@ -530,7 +545,7 @@ async function contextCommand(args, flags) {
       risk: flags.risk ?? "low",
       requireConfirmation: Boolean(flags.requireConfirmation ?? flags.confirm)
     });
-    await writeManifest(loaded.root, loaded.manifest);
+    await writeProjectState(loaded);
     console.log(`Added context ${name}`);
     return;
   }
@@ -538,7 +553,7 @@ async function contextCommand(args, flags) {
   if (subcommand === "remove") {
     const name = args[1] ?? flags.name;
     removeContext(loaded.manifest, name);
-    await writeManifest(loaded.root, loaded.manifest);
+    await writeProjectState(loaded);
     console.log(`Removed context ${name}`);
     return;
   }
@@ -548,7 +563,7 @@ async function contextCommand(args, flags) {
 
 async function policyCommand(args, flags) {
   const subcommand = args[0] ?? "show";
-  const loaded = await loadManifest(process.cwd());
+  const loaded = await loadProjectState(process.cwd());
 
   if (subcommand === "show") {
     if (flags.json) return printJson(loaded.manifest.policy);
@@ -572,15 +587,15 @@ async function policyCommand(args, flags) {
   if (!command) throw new KeyrailError("INVALID_ARGUMENTS", `Use keyrail policy ${subcommand} <command>`);
   if (!loaded.manifest.policy[listName].includes(command)) loaded.manifest.policy[listName].push(command);
   validateManifest(loaded.manifest);
-  await writeManifest(loaded.root, loaded.manifest);
+  await writeProjectState(loaded);
   console.log(`Added policy ${subcommand}: ${command}`);
 }
 
 async function auditCommand(args, flags) {
   const subcommand = args[0] ?? "list";
   if (subcommand !== "list") throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail audit list");
-  const loaded = await loadManifest(process.cwd());
-  const audit = await readAuditLog(loaded.root, Number(flags.limit ?? 50));
+  const loaded = await loadProjectState(process.cwd());
+  const audit = await readAuditLog(loaded, Number(flags.limit ?? 50));
   if (flags.json) return printJson(audit);
   if (!audit.length) {
     console.log("Audit: none");
@@ -622,37 +637,42 @@ async function serveCommand(flags) {
 
       if (route === "POST /api/context") {
         const body = await readJsonBody(req);
-        const loaded = await loadManifest(process.cwd());
+        const loaded = await loadProjectState(process.cwd());
         getContext(loaded.manifest, body.context);
-        await writeContextLock(loaded.root, { project: loaded.manifest.project.id, context: body.context });
+        await writeActiveContext(loaded, body.context);
         send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, context: body.context }));
         return;
       }
 
       if (route === "POST /api/manifest") {
         const body = await readJsonBody(req);
-        const loaded = await loadManifest(process.cwd());
+        const loaded = await loadProjectState(process.cwd());
         const nextManifest = {
           project: body.project ?? loaded.manifest.project,
           contexts: body.contexts ?? loaded.manifest.contexts,
           policy: body.policy ?? loaded.manifest.policy
         };
-        await writeManifest(loaded.root, nextManifest);
+        loaded.manifest = nextManifest;
+        await writeProjectState(loaded);
         send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }));
         return;
       }
 
       if (route === "POST /api/secret") {
         const body = await readJsonBody(req);
-        const loaded = await loadManifest(process.cwd());
-        const backend = createSecretBackend({ type: "local-file", root: loaded.root });
-        await backend.set(body.reference, body.value);
+        const loaded = await loadProjectState(process.cwd());
+        if (loaded.source === "user") await new GlobalSecretStore().set(body.reference, body.value);
+        else {
+          const backend = createSecretBackend({ type: "local-file", root: loaded.root });
+          await backend.set(body.reference, body.value);
+        }
         send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }));
         return;
       }
 
       if (route === "GET /api/audit") {
-        const audit = await readAuditLog(process.cwd());
+        const loaded = await loadProjectState(process.cwd());
+        const audit = await readAuditLog(loaded);
         send(res, 200, "application/json; charset=utf-8", JSON.stringify(audit));
         return;
       }
@@ -678,8 +698,8 @@ async function serveCommand(flags) {
 }
 
 async function getVerifiedState(contextName) {
-  const loaded = await loadManifest(process.cwd());
-  const activeContextName = await resolveActiveContextName(loaded.root, loaded.manifest, contextName);
+  const loaded = await loadProjectState(process.cwd());
+  const activeContextName = await resolveProjectContextName(loaded, contextName);
   const context = getContext(loaded.manifest, activeContextName);
   const identity = await identifyProject(loaded.root, loaded.manifest);
   const verification = verifyIdentity(identity, loaded.manifest);
@@ -753,12 +773,13 @@ async function spawnRedacted(command, env, secretValues) {
   }
 }
 
-async function appendAudit(root, audit) {
-  const dir = path.join(root, ".keyrail");
+async function appendAudit(state, audit) {
+  const dir = state.source === "user" ? path.join(getKeyrailConfigRoot(), "audit") : path.join(state.root, ".keyrail");
   await mkdir(dir, { recursive: true });
   const line = `${JSON.stringify(audit)}\n`;
   const { appendFile } = await import("node:fs/promises");
-  await appendFile(path.join(dir, "audit.log"), line, { mode: 0o600 });
+  const file = state.source === "user" ? `${projectKeyForRoot(state.root)}.log` : "audit.log";
+  await appendFile(path.join(dir, file), line, { mode: 0o600 });
 }
 
 function pass(name, message) {
@@ -799,7 +820,6 @@ function printHelp() {
   console.log(`Keyrail
 
 Usage:
-  keyrail init [--id <id>] [--name <name>] [--repo <url|local>] [--context <name>]
   keyrail auth add github <name> [--value-stdin]
   keyrail attach <service> <name> [--value <secret>]
   keyrail detach <service>
@@ -809,6 +829,7 @@ Usage:
   keyrail ui [--port <port>] [--token <token>]
 
 Advanced:
+  keyrail init [--id <id>] [--name <name>] [--repo <url|local>] [--context <name>]
   keyrail bind [--context <name>]
   keyrail current [--json] [--context <name>]
   keyrail identify [--json]
@@ -829,6 +850,125 @@ function titleize(value) {
   return value
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+async function ensureLocalKeyrailGitignore(root) {
+  const gitignorePath = path.join(root, ".gitignore");
+  const entries = [MANIFEST_FILE, ".keyrail/", ".ctx/"];
+  let current = "";
+  try {
+    current = await readFile(gitignorePath, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  const existing = new Set(current.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  const missing = entries.filter((entry) => !existing.has(entry));
+  if (!missing.length) return;
+
+  const prefix = current && !current.endsWith("\n") ? "\n" : "";
+  const section = `${current ? "\n" : ""}# Keyrail local agent state\n${missing.join("\n")}\n`;
+  await writeFile(gitignorePath, `${current}${prefix}${section}`);
+}
+
+async function loadProjectState(startDir = process.cwd()) {
+  const root = await findProjectRoot(startDir);
+  try {
+    return { ...(await loadManifest(root)), source: "manifest" };
+  } catch (error) {
+    if (error.code !== "MANIFEST_NOT_FOUND") throw error;
+  }
+
+  const store = await readProjectStore();
+  const key = projectKeyForRoot(root);
+  const existing = store.projects[key];
+  const manifest = existing?.manifest ? normalizeManifest(existing.manifest) : await createDefaultManifest(root);
+  return {
+    root,
+    path: getProjectStorePath(),
+    source: "user",
+    key,
+    activeContext: existing?.activeContext ?? manifest.project.defaultContext,
+    manifest
+  };
+}
+
+async function writeProjectState(state) {
+  if (state.source === "manifest") {
+    await writeManifest(state.root, state.manifest);
+    return;
+  }
+
+  const store = await readProjectStore();
+  store.projects[state.key ?? projectKeyForRoot(state.root)] = {
+    root: state.root,
+    activeContext: state.activeContext ?? state.manifest.project.defaultContext,
+    manifest: state.manifest
+  };
+  await writeProjectStore(store);
+}
+
+async function resolveProjectContextName(state, requestedContext = null) {
+  if (requestedContext) return requestedContext;
+  if (state.source === "user") return state.activeContext ?? state.manifest.project.defaultContext;
+  return resolveActiveContextName(state.root, state.manifest, requestedContext);
+}
+
+async function writeActiveContext(state, contextName) {
+  if (state.source === "manifest") {
+    await writeContextLock(state.root, { project: state.manifest.project.id, context: contextName });
+    return;
+  }
+
+  state.activeContext = contextName;
+  await writeProjectState(state);
+}
+
+async function createDefaultManifest(root) {
+  const identity = await identifyProject(root, null);
+  const id = identity.packageName ?? path.basename(root);
+  const repo = identity.gitRemote ?? "local";
+  return {
+    project: { id, name: titleize(id), repo, defaultContext: "local" },
+    contexts: {
+      local: {
+        name: "local",
+        risk: "low",
+        secrets: {},
+        requireConfirmation: false
+      }
+    },
+    policy: {
+      allow: ["gh issue list", "vercel deploy", "supabase db push"],
+      requireConfirm: ["vercel deploy --prod", "supabase db reset"],
+      deny: ["gh repo delete"]
+    }
+  };
+}
+
+function getProjectStorePath() {
+  return path.join(getKeyrailConfigRoot(), "projects.json");
+}
+
+async function readProjectStore() {
+  try {
+    const raw = await readFile(getProjectStorePath(), "utf8");
+    const store = JSON.parse(raw);
+    return { version: 1, projects: {}, ...store, projects: store.projects ?? {} };
+  } catch (error) {
+    if (error.code === "ENOENT") return { version: 1, projects: {} };
+    throw error;
+  }
+}
+
+async function writeProjectStore(store) {
+  const storePath = getProjectStorePath();
+  await mkdir(path.dirname(storePath), { recursive: true });
+  await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+}
+
+function projectKeyForRoot(root) {
+  return createHash("sha256").update(path.resolve(root)).digest("hex").slice(0, 24);
 }
 
 function getProfilePath() {
@@ -894,16 +1034,17 @@ async function createGithubAskpass(token) {
 }
 
 export async function getStateForUi(root = process.cwd(), requestedContext = null) {
-  const loaded = await loadManifest(root);
-  const activeContext = await resolveActiveContextName(loaded.root, loaded.manifest, requestedContext ?? undefined);
+  const loaded = await loadProjectState(root);
+  const activeContext = await resolveProjectContextName(loaded, requestedContext ?? undefined);
   const context = getContext(loaded.manifest, activeContext);
   const identity = await identifyProject(loaded.root, loaded.manifest);
   const verification = verifyIdentity(identity, loaded.manifest);
   const backend = createSecretBackend({ type: "local-file", root: loaded.root });
   const secrets = await backend.listReferences(context.secrets);
-  const audit = await readAuditLog(loaded.root);
+  const audit = await readAuditLog(loaded);
   return {
     root: loaded.root,
+    source: loaded.source,
     project: loaded.manifest.project,
     contexts: Object.values(loaded.manifest.contexts),
     context,
@@ -922,8 +1063,10 @@ export async function getStateForUi(root = process.cwd(), requestedContext = nul
   };
 }
 
-async function readAuditLog(root, limit = 50) {
-  const auditPath = path.join(root, ".keyrail", "audit.log");
+async function readAuditLog(state, limit = 50) {
+  const auditPath = state.source === "user"
+    ? path.join(getKeyrailConfigRoot(), "audit", `${projectKeyForRoot(state.root)}.log`)
+    : path.join(state.root, ".keyrail", "audit.log");
   try {
     const raw = await readFile(auditPath, "utf8");
     return raw.trim().split("\n").filter(Boolean).slice(-limit).map((line) => JSON.parse(line));
@@ -976,7 +1119,7 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
       <span class="muted">project keys for local agents</span>
     </div>
     <div class="toolbar">
-      <button class="primary" onclick="saveManifest()">Save manifest</button>
+      <button class="primary" onclick="saveManifest()">Save config</button>
       <button onclick="refreshState()">Refresh</button>
     </div>
   </header>
@@ -987,6 +1130,7 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
           <div class="muted">Project</div>
           <h2 id="project-name">${escapeHtml(state.project.name)}</h2>
           <div class="muted" id="project-id">${escapeHtml(state.project.id)}</div>
+          <div class="muted">${state.source === "user" ? "Stored in user Keyrail config" : `Stored in ${MANIFEST_FILE}`}</div>
           <div class="tag" id="verification">${state.verification.reason}</div>
         </div>
         <div class="card">
@@ -1007,7 +1151,7 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
           <p class="muted">Keyrail verifies this project and injects only the linked service keys for the active context.</p>
         </section>
         <section class="card">
-          <div class="muted">Manifest</div>
+          <div class="muted">Project Config</div>
           <textarea id="manifest-editor"></textarea>
         </section>
         <section class="card">

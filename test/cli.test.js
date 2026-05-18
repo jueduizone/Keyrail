@@ -127,6 +127,59 @@ test("attach status and detach provide the human-friendly service routing workfl
   assert.deepEqual(JSON.parse(run(["status", "--json"], cwd).stdout).services, []);
 });
 
+test("attach and run work without project init or project files", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-zero-init-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-zero-home-"));
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "zero-init-demo" }));
+  await mkdir(path.join(cwd, "src"), { recursive: true });
+
+  const projectCwd = path.join(cwd, "src");
+  const initialStatus = run(["status", "--json"], projectCwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(initialStatus.status, 0, initialStatus.stderr);
+  assert.equal(JSON.parse(initialStatus.stdout).project.id, "zero-init-demo");
+  await assert.rejects(readFile(path.join(keyrailHome, "projects.json"), "utf8"), { code: "ENOENT" });
+
+  const attach = run(["attach", "openai", "zero-openai", "--value", "DUMMY_ZERO_OPENAI_TOKEN"], projectCwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(attach.status, 0, attach.stderr);
+
+  const status = run(["status", "--json"], projectCwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  assert.equal(payload.project.id, "zero-init-demo");
+  assert.equal(payload.services[0].service, "openai");
+  assert.equal(payload.services[0].configured, true);
+
+  const allow = run(["policy", "allow", "node -e"], projectCwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(allow.status, 0, allow.stderr);
+
+  const result = run(["run", "--", "node", "-e", "console.log(process.env.OPENAI_API_KEY)"], projectCwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[REDACTED\]/);
+  assert.doesNotMatch(result.stdout, /DUMMY_ZERO_OPENAI_TOKEN/);
+
+  await assert.rejects(readFile(path.join(cwd, ".agent-context.yaml"), "utf8"), { code: "ENOENT" });
+  await assert.rejects(stat(path.join(cwd, ".ctx")), { code: "ENOENT" });
+  await assert.rejects(stat(path.join(cwd, ".keyrail")), { code: "ENOENT" });
+
+  const store = JSON.parse(await readFile(path.join(keyrailHome, "projects.json"), "utf8"));
+  assert.equal(Object.values(store.projects)[0].manifest.contexts.local.secrets.openai, "zero-openai");
+
+  const audit = run(["audit", "list", "--json"], projectCwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(audit.status, 0, audit.stderr);
+  assert.equal(JSON.parse(audit.stdout).at(-1).decision, "allowed");
+
+  const detach = run(["detach", "openai", "--delete-value"], projectCwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(detach.status, 0, detach.stderr);
+  const secretsAfterDetach = JSON.parse(await readFile(path.join(keyrailHome, "secrets.global.json"), "utf8"));
+  assert.equal(secretsAfterDetach["zero-openai"], undefined);
+});
+
 test("profile commands use a user-level config root for private repo bootstrap", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-profile-cwd-"));
   const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-home-"));
