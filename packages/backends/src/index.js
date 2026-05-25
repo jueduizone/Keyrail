@@ -52,7 +52,7 @@ export class LocalFileSecretBackend {
 
     for (const [provider, reference] of Object.entries(references ?? {})) {
       const value = store[reference] ?? globalStore[reference] ?? process.env[envNameForProvider(provider)] ?? null;
-      if (!value) {
+      if (value === null || value === undefined) {
         missing.push({ provider, reference });
         continue;
       }

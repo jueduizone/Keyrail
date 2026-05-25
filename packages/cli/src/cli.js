@@ -66,7 +66,7 @@ export async function main(argv) {
     case "context":
       return contextCommand(args, flags);
     case "policy":
-      return policyCommand(args, flags);
+      return policyCommand(args, flags, passthrough);
     case "audit":
       return auditCommand(args, flags);
     case "ui":
@@ -287,7 +287,7 @@ async function linkCommand(args, flags) {
   setSecretReference(loaded.manifest, contextName, service, reference);
   await writeProjectState(loaded);
 
-  if (flags.value) {
+  if (flags.value !== undefined) {
     if (loaded.source === "user") await new GlobalSecretStore().set(reference, flags.value);
     else {
       const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: loaded.root });
@@ -367,14 +367,14 @@ async function profileCommand(args, flags) {
   if (subcommand === "set") {
     const service = args[1] ?? flags.service;
     const reference = args[2] ?? flags.reference;
-    const value = flags.value ?? (flags.valueStdin ? await readStdin() : null);
+    const value = flags.value ?? (flags.valueStdin ? await readStdin({ allowEmpty: flags.allowEmpty }) : null);
     if (!service || !reference) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail profile set <service> <reference> [--value <secret>|--value-stdin]");
     const profile = await readProfile();
     profile.services[service] = { reference };
     profile.accounts[service] = profile.accounts[service] ?? {};
     profile.accounts[service][reference] = { reference };
     await writeProfile(profilePath, profile);
-    if (value) await new GlobalSecretStore().set(reference, value);
+    if (value !== null) await new GlobalSecretStore().set(reference, value);
     console.log(`Saved ${service} account ${reference}`);
     return;
   }
@@ -485,7 +485,7 @@ async function secretsCommand(args, flags) {
     const contextName = await resolveProjectContextName(loaded, flags.context);
     setSecretReference(loaded.manifest, contextName, provider, reference);
     await writeProjectState(loaded);
-    if (value) {
+    if (value !== undefined) {
       if (loaded.source === "user") await new GlobalSecretStore().set(reference, value);
       else await secretBackend.set(reference, value);
     }
@@ -561,7 +561,7 @@ async function contextCommand(args, flags) {
   throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail context list|use|add|remove");
 }
 
-async function policyCommand(args, flags) {
+async function policyCommand(args, flags, passthrough = []) {
   const subcommand = args[0] ?? "show";
   const loaded = await loadProjectState(process.cwd());
 
@@ -583,8 +583,8 @@ async function policyCommand(args, flags) {
   }[subcommand];
   if (!listName) throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail policy show|allow|deny|require-confirm <command>");
 
-  const command = args.slice(1).join(" ") || flags.command;
-  if (!command) throw new KeyrailError("INVALID_ARGUMENTS", `Use keyrail policy ${subcommand} <command>`);
+  const command = commandFromPolicyArgs(args.slice(1), flags, passthrough);
+  if (!command) throw new KeyrailError("INVALID_ARGUMENTS", `Use keyrail policy ${subcommand} <command> or keyrail policy ${subcommand} -- <command>`);
   if (!loaded.manifest.policy[listName].includes(command)) loaded.manifest.policy[listName].push(command);
   validateManifest(loaded.manifest);
   await writeProjectState(loaded);
@@ -839,7 +839,7 @@ Advanced:
   keyrail profile list|set|unset
   keyrail use <service> [--reference <reference>] -- <command>
   keyrail context list|use|add|remove
-  keyrail policy show|allow|deny|require-confirm
+  keyrail policy show|allow|deny|require-confirm [--] <command>
   keyrail handoff [--json] [--context <name>]
   keyrail secrets list|set|unset [--context <name>]
   keyrail audit list [--json]
@@ -997,10 +997,19 @@ async function writeProfile(profilePath, profile) {
   await writeFile(profilePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function readStdin() {
+async function readStdin(options = {}) {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
-  return Buffer.concat(chunks.map((chunk) => (typeof chunk === "string" ? Buffer.from(chunk) : chunk))).toString("utf8").trim();
+  const value = Buffer.concat(chunks.map((chunk) => (typeof chunk === "string" ? Buffer.from(chunk) : chunk))).toString("utf8").trim();
+  if (!value && !options.allowEmpty) {
+    throw new KeyrailError("EMPTY_SECRET", "Refusing to save empty secret from stdin. Pass --allow-empty if this is intentional.");
+  }
+  return value;
+}
+
+function commandFromPolicyArgs(args, flags, passthrough) {
+  if (passthrough.length > 0) return normalizeCommand(passthrough);
+  return args.join(" ") || flags.command;
 }
 
 async function envForServiceCommand(service, token, command) {

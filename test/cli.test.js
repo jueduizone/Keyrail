@@ -269,6 +269,26 @@ test("profile set accepts secret values from stdin", async () => {
   assert.equal(secrets["stdin-github"], "DUMMY_STDIN_GITHUB_TOKEN");
 });
 
+test("profile set rejects empty stdin unless explicitly allowed", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-profile-empty-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-empty-home-"));
+
+  const empty = run(["auth", "add", "github", "empty-github", "--value-stdin"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }, "");
+  assert.notEqual(empty.status, 0);
+  assert.match(empty.stderr, /Refusing to save empty secret/);
+
+  const allowed = run(["auth", "add", "github", "empty-github", "--value-stdin", "--allow-empty"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }, "");
+  assert.equal(allowed.status, 0, allowed.stderr);
+  const profile = JSON.parse(await readFile(path.join(keyrailHome, "profiles.json"), "utf8"));
+  assert.equal(profile.accounts.github["empty-github"].reference, "empty-github");
+  const secrets = JSON.parse(await readFile(path.join(keyrailHome, "secrets.global.json"), "utf8"));
+  assert.equal(secrets["empty-github"], "");
+});
+
 test("use injects a configured service key into a normal child command", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-use-cwd-"));
   const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-use-home-"));
@@ -328,6 +348,20 @@ test("policy and audit commands expose configured rules and run decisions", asyn
   const entries = JSON.parse(audit.stdout);
   assert.equal(entries.at(-1).decision, "allowed");
   assert.equal(entries.at(-1).command, "node -e console.log('ok')");
+});
+
+test("policy allow accepts a full command after --", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-policy-passthrough-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-policy-passthrough-home-"));
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "policy-passthrough-demo" }));
+
+  const allow = run(["policy", "allow", "--", "/bin/zsh", "-lc", "printf '%s' \"$TOKEN\" | npx vercel env add FOO production"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(allow.status, 0, allow.stderr);
+
+  const policy = JSON.parse(run(["policy", "show", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout);
+  assert.ok(policy.allow.includes("/bin/zsh -lc printf '%s' \"$TOKEN\" | npx vercel env add FOO production"));
 });
 
 function run(args, cwd, env = {}, input = undefined) {

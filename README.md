@@ -2,7 +2,7 @@
 
 **Make local agents use the right keys for the right project.**
 
-[中文文档](README.zh-CN.md) · [Tutorial](docs/tutorial.md) · [中文教程](docs/tutorial.zh-CN.md)
+[中文文档](README.zh-CN.md) · [Tutorial](docs/tutorial.md) · [中文教程](docs/tutorial.zh-CN.md) · [Product feedback](docs/product-feedback.md)
 
 Keyrail is a local credential router for coding agents. If one machine has many projects, and each project uses different GitHub, Vercel, Supabase, OpenAI, Anthropic, Stripe, or other service keys, Keyrail gives agents one simple rule:
 
@@ -225,6 +225,12 @@ keyrail secrets list|set|unset
 keyrail audit list --json
 keyrail handoff --json
 keyrail doctor
+```
+
+For complex commands, prefer passing the full policy pattern after `--` so the shell does not treat pipes or redirects as part of the outer command:
+
+```bash
+keyrail policy allow -- "/bin/zsh -lc 'printf ... | npx vercel env add ...'"
 ```
 
 ## Development

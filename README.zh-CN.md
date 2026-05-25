@@ -2,7 +2,7 @@
 
 **让本地 Agent 在正确的工程里使用正确的 key。**
 
-[English](README.md) · [中文教程](docs/tutorial.zh-CN.md) · [Tutorial](docs/tutorial.md)
+[English](README.md) · [中文教程](docs/tutorial.zh-CN.md) · [Tutorial](docs/tutorial.md) · [产品反馈](docs/product-feedback.md)
 
 Keyrail 是一个本地凭据路由器。你可能在一台电脑上有很多工程，每个工程使用不同的 GitHub、Vercel、Supabase、OpenAI、Anthropic、Stripe 或其他服务 key。Keyrail 给 Agent 一个简单规则：
 
@@ -225,6 +225,12 @@ keyrail secrets list|set|unset
 keyrail audit list --json
 keyrail handoff --json
 keyrail doctor
+```
+
+复杂命令建议把完整 policy pattern 放在 `--` 后面，避免 shell 先把管道或重定向当成外层命令执行：
+
+```bash
+keyrail policy allow -- "/bin/zsh -lc 'printf ... | npx vercel env add ...'"
 ```
 
 ## 开发
