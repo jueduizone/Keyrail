@@ -27,6 +27,27 @@ import {
 } from "@keyrail/core";
 import { evaluatePolicy, normalizeCommand } from "@keyrail/policy";
 
+const POLICY_PRESETS = {
+  vercel: {
+    description: "Vercel deploys and environment sync inspection.",
+    allow: ["vercel deploy", "vercel env ls", "vercel env pull", "vercel env add", "keyrail sync vercel-env"],
+    requireConfirm: ["vercel deploy --prod", "keyrail sync vercel-env --target production"],
+    deny: []
+  },
+  "cloudflare-api": {
+    description: "Cloudflare read/write API calls that avoid destructive zone deletion by default.",
+    allow: ["wrangler whoami", "wrangler deploy", "wrangler pages deploy", "wrangler kv namespace list", "curl https://api.cloudflare.com/client/v4"],
+    requireConfirm: ["wrangler secret put", "wrangler kv key put", "wrangler d1 execute"],
+    deny: ["wrangler delete", "wrangler pages project delete", "wrangler kv namespace delete", "wrangler d1 delete"]
+  },
+  "github-read": {
+    description: "Read-only GitHub CLI and git fetch/clone workflows.",
+    allow: ["gh issue list", "gh issue view", "gh pr list", "gh pr view", "gh repo view", "git fetch", "git pull", "git clone"],
+    requireConfirm: [],
+    deny: ["gh repo delete", "gh repo archive", "git push --force"]
+  }
+};
+
 export async function main(argv) {
   const { command, args, flags, passthrough } = parseArgs(argv);
 
@@ -689,6 +710,28 @@ async function policyCommand(args, flags, passthrough = []) {
     return;
   }
 
+  if (subcommand === "preset") {
+    const presetName = args[1];
+    if (!presetName || flags.show) {
+      const payload = presetName ? policyPresetPayload(presetName) : policyPresetListPayload();
+      if (flags.json) return printJson(payload);
+      printPolicyPreset(payload, Boolean(presetName));
+      return;
+    }
+    const preset = POLICY_PRESETS[presetName];
+    if (!preset) throw new KeyrailError("UNKNOWN_POLICY_PRESET", `Unknown policy preset "${presetName}". Available: ${Object.keys(POLICY_PRESETS).join(", ")}`);
+
+    const before = clonePolicy(loaded.manifest.policy);
+    const added = applyPolicyPreset(loaded.manifest.policy, preset);
+    validateManifest(loaded.manifest);
+    await writeProjectState(loaded);
+    const payload = { name: presetName, description: preset.description, added, policy: loaded.manifest.policy, before };
+    if (flags.json) return printJson(payload);
+    console.log(`Applied policy preset ${presetName}: ${preset.description}`);
+    printPolicyAdded(added);
+    return;
+  }
+
   if (subcommand === "allow-last") {
     const audit = await readAuditLog(loaded, 100);
     const last = [...audit].reverse().find((entry) => entry.decision === "denied" || entry.decision === "confirmation_required");
@@ -715,7 +758,7 @@ async function policyCommand(args, flags, passthrough = []) {
     "deny": "deny",
     "require-confirm": "requireConfirm"
   }[subcommand];
-  if (!listName) throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail policy show|allow|allow-last|deny|require-confirm <command>");
+  if (!listName) throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail policy show|preset|allow|allow-last|deny|require-confirm <command>");
 
   const command = commandFromPolicyArgs(args.slice(1), flags, passthrough);
   if (!command) throw new KeyrailError("INVALID_ARGUMENTS", `Use keyrail policy ${subcommand} <command> or keyrail policy ${subcommand} -- <command>`);
@@ -723,6 +766,60 @@ async function policyCommand(args, flags, passthrough = []) {
   validateManifest(loaded.manifest);
   await writeProjectState(loaded);
   console.log(`Added policy ${subcommand}: ${command}`);
+}
+
+function policyPresetListPayload() {
+  return Object.fromEntries(Object.entries(POLICY_PRESETS).map(([name, preset]) => [name, policyPresetPayload(name, preset)]));
+}
+
+function policyPresetPayload(name, preset = POLICY_PRESETS[name]) {
+  if (!preset) throw new KeyrailError("UNKNOWN_POLICY_PRESET", `Unknown policy preset "${name}". Available: ${Object.keys(POLICY_PRESETS).join(", ")}`);
+  return { name, description: preset.description, allow: preset.allow, requireConfirm: preset.requireConfirm, deny: preset.deny };
+}
+
+function clonePolicy(policy) {
+  return {
+    allow: [...(policy.allow ?? [])],
+    requireConfirm: [...(policy.requireConfirm ?? [])],
+    deny: [...(policy.deny ?? [])]
+  };
+}
+
+function applyPolicyPreset(policy, preset) {
+  const added = { allow: [], requireConfirm: [], deny: [] };
+  for (const listName of Object.keys(added)) {
+    policy[listName] = policy[listName] ?? [];
+    for (const command of preset[listName] ?? []) {
+      if (!policy[listName].includes(command)) {
+        policy[listName].push(command);
+        added[listName].push(command);
+      }
+    }
+  }
+  return added;
+}
+
+function printPolicyPreset(payload, single) {
+  if (!single) {
+    console.log("Policy presets:");
+    for (const preset of Object.values(payload)) console.log(`- ${preset.name}: ${preset.description}`);
+    console.log("Show: keyrail policy preset <name> --show");
+    console.log("Apply: keyrail policy preset <name>");
+    return;
+  }
+  console.log(`Policy preset ${payload.name}: ${payload.description}`);
+  console.log("Allow:");
+  for (const item of payload.allow) console.log(`- ${item}`);
+  console.log("Require confirm:");
+  for (const item of payload.requireConfirm) console.log(`- ${item}`);
+  console.log("Deny:");
+  for (const item of payload.deny) console.log(`- ${item}`);
+}
+
+function printPolicyAdded(added) {
+  for (const [listName, commands] of Object.entries(added)) {
+    console.log(`${listName}: ${commands.length ? commands.join(", ") : "no changes"}`);
+  }
 }
 
 async function syncCommand(args, flags) {
@@ -1092,6 +1189,16 @@ async function buildStatusPayload(state, flags = {}) {
     missing,
     suggestions
   });
+  const audit = await readAuditLog(state);
+  const policyRepair = buildPolicyRepairState(audit, state.manifest.policy);
+  const vercelEnvSync = buildVercelEnvSyncPanel({
+    project: state.manifest.project,
+    context: state.context,
+    services,
+    vercelProject: flags.project ?? state.manifest.project.id,
+    envTarget: flags.target ?? defaultVercelEnvTarget(state.context.name),
+    yes: Boolean(flags.yes)
+  });
 
   return {
     project: state.manifest.project,
@@ -1121,7 +1228,9 @@ async function buildStatusPayload(state, flags = {}) {
       instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
     },
     suggestions,
-    nextSteps
+    nextSteps,
+    policyRepair,
+    vercelEnvSync
   };
 }
 
@@ -1168,6 +1277,59 @@ function servicesRelevantToProject(state, profile) {
   return [...relevant].filter((service) => available.has(service)).sort();
 }
 
+function buildVercelEnvSyncPanel({ project, context, services, vercelProject, envTarget, yes = false }) {
+  const auth = services.find((service) => service.service === "vercel");
+  const mappings = services
+    .filter((service) => service.service !== "vercel")
+    .map((service) => ({
+      service: service.service,
+      reference: service.reference,
+      envName: service.envName,
+      alias: Boolean(service.alias),
+      configured: Boolean(service.configured),
+      status: service.configured ? "ready" : "missing",
+      command: vercelEnvDryRunCommand({ project, envTarget, vercelProject, envName: service.envName, yes })
+    }));
+  return {
+    target: "vercel-env",
+    vercelProject,
+    envTarget,
+    auth: auth ? {
+      service: auth.service,
+      reference: auth.reference,
+      envName: auth.envName,
+      configured: Boolean(auth.configured),
+      status: auth.configured ? "ready" : "missing"
+    } : { service: "vercel", envName: "VERCEL_TOKEN", configured: false, status: "unattached" },
+    mappings,
+    dryRunCommand: `keyrail sync vercel-env --dry-run --target ${envTarget} --project ${vercelProject}`,
+    note: "Dry-run commands show env names and references only; Keyrail never renders secret values."
+  };
+}
+
+function vercelEnvDryRunCommand({ envTarget, vercelProject }) {
+  return `keyrail sync vercel-env --dry-run --target ${envTarget} --project ${vercelProject}`;
+}
+
+function printVercelEnvSyncSummary(panel) {
+  console.log("Vercel env sync:");
+  console.log(`- auth: ${panel.auth.envName} (${panel.auth.status})`);
+  console.log(`- target: ${panel.envTarget} / project ${panel.vercelProject}`);
+  if (panel.mappings.length) {
+    for (const mapping of panel.mappings) console.log(`- ${mapping.envName}${mapping.alias ? " (alias)" : ""}: ${mapping.status} from ${mapping.service}:${mapping.reference}`);
+  } else {
+    console.log("- mappings: none (attach non-Vercel secrets to sync)");
+  }
+  console.log(`- dry-run: ${panel.dryRunCommand}`);
+}
+
+function printPolicyRepair(repair) {
+  console.log("Policy repair:");
+  console.log(`- ${repair.decision}: ${repair.command}`);
+  if (repair.reason) console.log(`- reason: ${repair.reason}`);
+  for (const step of repair.nextSteps ?? []) console.log(`- ${step.command} (${step.reason})`);
+}
+
 function printDeploymentStatus(payload) {
   console.log(`${payload.project.name} (${payload.project.id})`);
   console.log(`Root: ${payload.root}`);
@@ -1181,6 +1343,8 @@ function printDeploymentStatus(payload) {
       console.log(`- ${service.service}: ${service.envName}${service.alias ? " (alias)" : ""} (${service.configured ? "configured" : "missing"})`);
     }
   }
+  if (payload.vercelEnvSync) printVercelEnvSyncSummary(payload.vercelEnvSync);
+  if (payload.policyRepair) printPolicyRepair(payload.policyRepair);
   if (payload.suggestions?.length) {
     console.log("Suggestions:");
     for (const suggestion of payload.suggestions) {
@@ -1394,6 +1558,8 @@ async function remediationForPolicyDecision(decision, command, state, flags = {}
       message: "Retry with --yes or set KEYRAIL_CONFIRM=1 after confirming the project/context.",
       nextSteps: [
         nextStep(confirmCommand, "Confirm this command for the current context."),
+        nextStep("KEYRAIL_CONFIRM=1 keyrail run -- <command>", "Alternative confirmation form for non-interactive runners."),
+        nextStep("keyrail policy allow-last", "Promote this last confirmation-required audit command into require-confirm policy."),
         nextStep("keyrail doctor", "Review identity, context risk, and policy guidance.")
       ]
     };
@@ -1416,10 +1582,7 @@ async function remediationForPolicyDecision(decision, command, state, flags = {}
   const policyAction = policyActionForCommand(normalized, state.manifest.policy);
   return {
     message: `Review with keyrail doctor or allow it with ${policyAction}.`,
-    nextSteps: [
-      nextStep("keyrail doctor", "See policy guidance for common commands in this repo."),
-      nextStep(policyAction, "Add a narrow allow rule if this command is expected.")
-    ]
+    nextSteps: policyRepairNextSteps(normalized, "denied", explicitDenyForCommand(normalized, state.manifest.policy), true)
   };
 }
 
@@ -1430,8 +1593,12 @@ function confirmationCommandFor(command, flags = {}) {
   return `keyrail run --yes -- ${command}`;
 }
 
+function explicitDenyForCommand(command, policy) {
+  return (policy.deny ?? []).find((pattern) => command.startsWith(pattern)) ?? null;
+}
+
 function policyActionForCommand(command, policy) {
-  const denied = (policy.deny ?? []).find((pattern) => command.startsWith(pattern));
+  const denied = explicitDenyForCommand(command, policy);
   if (denied) return `keyrail policy show --json # denied by "${denied}"`;
   return `keyrail policy allow -- ${command}`;
 }
@@ -1740,7 +1907,7 @@ Advanced:
   keyrail profile list|set|unset
   keyrail use <service> [--reference <reference>] -- <command>
   keyrail context list|use|add|remove
-  keyrail policy show|allow|deny|require-confirm [--] <command>
+  keyrail policy show|preset|allow|allow-last|deny|require-confirm [--] <command>
   keyrail handoff [--json] [--context <name>]
   keyrail secrets list|set|unset [--context <name>]
   keyrail audit list [--json]
@@ -1952,6 +2119,21 @@ export async function getStateForUi(root = process.cwd(), requestedContext = nul
   const backend = createSecretBackend({ type: "local-file", root: loaded.root });
   const secrets = await backend.listReferences(context.secrets);
   const audit = await readAuditLog(loaded);
+  const services = secrets.map((secret) => ({
+    service: secret.provider,
+    reference: secret.reference,
+    envName: secret.envName,
+    alias: secret.alias,
+    configured: secret.configured
+  }));
+  const vercelEnvSync = buildVercelEnvSyncPanel({
+    project: loaded.manifest.project,
+    context,
+    services,
+    vercelProject: loaded.manifest.project.id,
+    envTarget: defaultVercelEnvTarget(context.name)
+  });
+  const policyRepair = buildPolicyRepairState(audit, loaded.manifest.policy);
   return {
     root: loaded.root,
     source: loaded.source,
@@ -1961,15 +2143,11 @@ export async function getStateForUi(root = process.cwd(), requestedContext = nul
     identity,
     verification,
     secrets,
-    services: secrets.map((secret) => ({
-      service: secret.provider,
-      reference: secret.reference,
-      envName: secret.envName,
-      alias: secret.alias,
-      configured: secret.configured
-    })),
+    services,
     audit,
     policy: loaded.manifest.policy,
+    policyRepair,
+    vercelEnvSync,
     activeContext
   };
 }
@@ -1984,6 +2162,43 @@ async function readAuditLog(state, limit = 50) {
   } catch {
     return [];
   }
+}
+
+function buildPolicyRepairState(audit, policy) {
+  const last = [...(audit ?? [])].reverse().find((entry) => entry.decision === "denied" || entry.decision === "confirmation_required");
+  if (!last?.command) return null;
+  const deniedBy = (policy.deny ?? []).find((pattern) => last.command.startsWith(pattern));
+  return {
+    decision: last.decision,
+    command: last.command,
+    reason: last.reason,
+    nextSteps: policyRepairNextSteps(last.command, last.decision, deniedBy)
+  };
+}
+
+function policyRepairNextSteps(command, decision, deniedBy = null, includeDoctor = false) {
+  if (decision === "confirmation_required") {
+    const steps = [
+      nextStep(`keyrail run --yes -- ${command}`, "Confirm and retry this exact command."),
+      nextStep("KEYRAIL_CONFIRM=1 keyrail run -- <command>", "Alternative confirmation form for non-interactive runners."),
+      nextStep("keyrail policy allow-last", "Promote this last confirmation-required audit command into require-confirm policy.")
+    ];
+    if (includeDoctor) steps.push(nextStep("keyrail doctor", "Review identity, context risk, and policy guidance."));
+    return steps;
+  }
+  const steps = [];
+  if (includeDoctor) steps.push(nextStep("keyrail doctor", "See policy guidance for common commands in this repo."));
+  steps.push(nextStep("keyrail policy allow-last", "Allow the last denied audit command exactly."));
+  if (deniedBy) {
+    steps.push(nextStep("keyrail policy show --json", `Review explicit deny rule "${deniedBy}" before changing policy.`));
+    return steps;
+  }
+  steps.push(nextStep(`keyrail policy allow -- ${command}`, "Add a narrow allow rule for this command."));
+  const provider = providerForCommand(command);
+  if (provider === "vercel") steps.push(nextStep("keyrail policy preset vercel", "Apply the common Vercel workflow preset."));
+  if (provider === "github") steps.push(nextStep("keyrail policy preset github-read", "Apply read-only GitHub workflow rules."));
+  if (/\b(wrangler|cloudflare)\b/i.test(command)) steps.push(nextStep("keyrail policy preset cloudflare-api", "Apply the common Cloudflare API workflow preset."));
+  return steps;
 }
 
 export async function renderUiHtml(root = process.cwd(), token = "") {
@@ -2066,6 +2281,14 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
           <textarea id="manifest-editor"></textarea>
         </section>
         <section class="card">
+          <div class="muted">Vercel Env Sync</div>
+          <div id="vercel-sync"></div>
+        </section>
+        <section class="card">
+          <div class="muted">Policy Repair</div>
+          <div id="policy-repair"></div>
+        </section>
+        <section class="card">
           <div class="muted">Audit</div>
           <pre id="audit-log"></pre>
         </section>
@@ -2077,6 +2300,8 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
     const editor = document.getElementById('manifest-editor');
     const contextList = document.getElementById('context-list');
     const secretList = document.getElementById('secret-list');
+    const vercelSync = document.getElementById('vercel-sync');
+    const policyRepair = document.getElementById('policy-repair');
     const auditLog = document.getElementById('audit-log');
     editor.value = ${JSON.stringify(stringifyManifestForEditor(state))};
     render();
@@ -2104,10 +2329,28 @@ export async function renderUiHtml(root = process.cwd(), token = "") {
     function render() {
       contextList.innerHTML = state.contexts.map((context) => '<button class="context-btn' + (context.name === state.activeContext ? ' active' : '') + '" onclick="switchContext(\\'' + escapeJs(context.name) + '\\')">' + escapeHtml(context.name) + '</button>').join('');
       secretList.innerHTML = state.services.length
-        ? state.services.map((service) => '<div class="service-row"><div><strong>' + escapeHtml(service.service) + '</strong><div class="muted">' + escapeHtml(service.reference) + ' -> ' + escapeHtml(service.envName) + '</div></div><span class="' + (service.configured ? 'status-ok' : 'status-warn') + '">' + (service.configured ? 'Ready' : 'Reference only') + '</span></div>').join('')
+        ? state.services.map((service) => '<div class="service-row"><div><strong>' + escapeHtml(service.service) + '</strong><div class="muted">' + escapeHtml(service.reference) + ' -> ' + escapeHtml(service.envName) + (service.alias ? ' <span class="tag">alias</span>' : '') + '</div></div><span class="' + (service.configured ? 'status-ok' : 'status-warn') + '">' + (service.configured ? 'Ready' : 'Reference only') + '</span></div>').join('')
         : '<div class="muted">No services attached yet. Use keyrail attach github personal.</div>';
+      vercelSync.innerHTML = renderVercelSync(state.vercelEnvSync);
+      policyRepair.innerHTML = renderPolicyRepair(state.policyRepair);
       auditLog.textContent = state.audit?.length ? state.audit.map((entry) => JSON.stringify(entry, null, 2)).join('\\n\\n') : 'No audit entries';
       window.__manifestDraft = stateToManifest(state, editor.value);
+    }
+
+    function renderVercelSync(panel) {
+      if (!panel) return '<div class="muted">No Vercel sync state.</div>';
+      const mappings = panel.mappings?.length
+        ? panel.mappings.map((mapping) => '<div class="service-row"><div><strong>' + escapeHtml(mapping.envName) + '</strong>' + (mapping.alias ? ' <span class="tag">alias</span>' : '') + '<div class="muted">' + escapeHtml(mapping.service) + ':' + escapeHtml(mapping.reference) + '</div></div><span class="' + (mapping.configured ? 'status-ok' : 'status-warn') + '">' + escapeHtml(mapping.status) + '</span></div>').join('')
+        : '<div class="muted">No non-Vercel secrets to sync.</div>';
+      return '<div class="stack"><div><strong>Auth:</strong> ' + escapeHtml(panel.auth.envName) + ' <span class="' + (panel.auth.configured ? 'status-ok' : 'status-warn') + '">' + escapeHtml(panel.auth.status) + '</span></div><div class="muted">Target: ' + escapeHtml(panel.envTarget) + ' / project ' + escapeHtml(panel.vercelProject) + '</div>' + mappings + '<div class="muted">Dry-run: <code>' + escapeHtml(panel.dryRunCommand) + '</code></div><div class="muted">' + escapeHtml(panel.note) + '</div></div>';
+    }
+
+    function renderPolicyRepair(repair) {
+      if (!repair) return '<div class="muted">No denied or confirmation-required command in recent audit.</div>';
+      const steps = repair.nextSteps?.length
+        ? repair.nextSteps.map((step) => '<li><code>' + escapeHtml(step.command) + '</code><div class="muted">' + escapeHtml(step.reason) + '</div></li>').join('')
+        : '';
+      return '<div class="stack"><div><strong>' + escapeHtml(repair.decision) + '</strong>: <code>' + escapeHtml(repair.command) + '</code></div>' + (repair.reason ? '<div class="muted">' + escapeHtml(repair.reason) + '</div>' : '') + '<ol>' + steps + '</ol></div>';
     }
 
     editor.addEventListener('input', () => { window.__manifestDraft = stateToManifest(state, editor.value); });

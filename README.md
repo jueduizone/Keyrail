@@ -55,7 +55,9 @@ Keyrail removes that ambiguity without requiring every repo collaborator to use 
 - Resolves named service accounts from user-level storage, project-local storage, or environment variables.
 - Injects keys only into the child process launched by `keyrail run`.
 - Redacts command output.
-- Gives agents structured context through `status --json`.
+- `keyrail sync vercel-env` previews and syncs project env mappings to Vercel, including custom `--env` aliases.
+- `keyrail policy preset <name>` applies reviewed policy bundles for common workflows.
+- If policy blocks a command, Keyrail records it in audit and returns guided repair steps.
 - Provides a local UI for non-technical users.
 
 ## Install
@@ -203,6 +205,18 @@ Use `keyrail run --dry-run -- <command>` before deploys to see policy results, i
 
 `keyrail sync vercel-env` copies resolved project secrets (except the attached `vercel` token used only for authentication) to Vercel using `vercel env add <ENV_NAME> <target> --project <project>`. When `--target` is omitted, Keyrail maps `local/dev/development` to `development`, `prod/production` to `production`, and `preview/staging` to `preview`. Use `--dry-run` to inspect env names without writing, `--json` for machine-readable output, `--target <production|preview|development|...>` to choose the Vercel environment, `--project <name>` to override the default project id, and `--yes` to forward confirmation to Vercel. Keyrail redacts secret values from Vercel subprocess output and audits synced, missing, and failed env names without storing raw values.
 
+Policy presets package common low-friction command rules without forcing users to allow broad shell wrappers:
+
+```bash
+keyrail policy preset                 # list presets
+keyrail policy preset vercel --show   # inspect allow/confirm/deny rules
+keyrail policy preset vercel          # apply Vercel deploy/env-sync rules
+keyrail policy preset cloudflare-api
+keyrail policy preset github-read
+```
+
+When `keyrail run` denies a command or requires confirmation, stderr includes structured `nextSteps`. `keyrail status --json` and the local UI also show the latest denied/confirmation-required audit entry with repair commands such as `keyrail policy allow-last`, a narrow `keyrail policy allow -- <command>`, a relevant preset, or `keyrail run --yes -- <command>`.
+
 ## Local UI
 
 `keyrail ui` starts a local browser manager for users who do not want to edit JSON or YAML.
@@ -214,8 +228,10 @@ It shows:
 - active context
 - linked services
 - ready vs account-name-only keys
-- agent command guidance
 - project config and audit views
+- env alias labels, so custom names like `CLOUDFLARE_STREAM_API_TOKEN` are visible
+- a Vercel env sync panel with auth status, target environment, mappings, and safe dry-run command text
+- guided policy repair for the latest denied or confirmation-required audit entry
 
 The UI binds to `127.0.0.1` and prints a tokenized URL.
 

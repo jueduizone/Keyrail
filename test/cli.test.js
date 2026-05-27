@@ -91,6 +91,8 @@ test("ui renders current project state", async () => {
   assert.match(html, /manifest-editor/);
   assert.match(html, /Agent Command/);
   assert.match(html, /Services/);
+  assert.match(html, /Vercel Env Sync/);
+  assert.match(html, /Policy Repair/);
 });
 
 test("context and secret management commands update the manifest", async () => {
@@ -201,6 +203,11 @@ test("attach supports env aliases and reports them in status doctor and dry-run"
   const dryRunPayload = JSON.parse(dryRun.stdout);
   assert.equal(dryRunPayload.missing[0].envName, "CLOUDFLARE_STREAM_API_TOKEN");
   assert.equal(dryRunPayload.missing[0].alias, true);
+
+  const html = await renderUiHtml(cwd);
+  assert.match(html, /CLOUDFLARE_STREAM_API_TOKEN/);
+  assert.match(html, /Vercel Env Sync/);
+  assert.match(html, /keyrail sync vercel-env --dry-run --target development --project demo/);
 });
 
 test("run --with injects attached project secrets plus explicit service accounts", async () => {
@@ -761,6 +768,67 @@ test("sync vercel-env uses existing Vercel token remediation when token is missi
   assert.match(result.stderr, /VERCEL_TOKEN is not configured/);
   assert.match(result.stderr, /keyrail auth add vercel <name> --value-stdin/);
   assert.doesNotMatch(result.stderr, /DUMMY_MISSING_TOKEN_OPENAI/);
+});
+
+test("status and UI expose Vercel env sync mappings and policy repair guidance", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-ui-p2-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "vercel", "demo-vercel", "--value", "DUMMY_UI_VERCEL_TOKEN"], cwd).status, 0);
+  assert.equal(run(["attach", "cloudflare-stream-api-token", "demo-cloudflare", "--env", "CLOUDFLARE_STREAM_API_TOKEN"], cwd).status, 0);
+
+  const denied = run(["run", "--dry-run", "--", "vercel", "env", "add", "FOO", "preview"], cwd);
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /keyrail policy allow-last/);
+  assert.match(denied.stderr, /keyrail policy preset vercel/);
+
+  const status = run(["status", "--json"], cwd);
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  assert.equal(payload.vercelEnvSync.auth.status, "ready");
+  assert.deepEqual(payload.vercelEnvSync.mappings.map((item) => item.envName), ["CLOUDFLARE_STREAM_API_TOKEN"]);
+  assert.equal(payload.vercelEnvSync.mappings[0].alias, true);
+  assert.equal(payload.policyRepair.command, "vercel env add FOO preview");
+  assert.ok(payload.policyRepair.nextSteps.some((step) => step.command === "keyrail policy preset vercel"));
+
+  const human = run(["status"], cwd);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Vercel env sync:/);
+  assert.match(human.stdout, /CLOUDFLARE_STREAM_API_TOKEN \(alias\)/);
+  assert.match(human.stdout, /Policy repair:/);
+
+  const html = await renderUiHtml(cwd);
+  assert.match(html, /Policy Repair/);
+  assert.match(html, /keyrail policy preset vercel/);
+  assert.match(html, /CLOUDFLARE_STREAM_API_TOKEN/);
+  assert.doesNotMatch(html, /DUMMY_UI_VERCEL_TOKEN/);
+});
+
+test("policy presets can be listed shown applied idempotently", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-policy-preset-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const listed = run(["policy", "preset", "--json"], cwd);
+  assert.equal(listed.status, 0, listed.stderr);
+  const presets = JSON.parse(listed.stdout);
+  assert.ok(presets.vercel.allow.includes("vercel env add"));
+  assert.ok(presets["cloudflare-api"].deny.includes("wrangler delete"));
+
+  const shown = run(["policy", "preset", "vercel", "--show", "--json"], cwd);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(JSON.parse(shown.stdout).name, "vercel");
+
+  const applied = run(["policy", "preset", "vercel", "--json"], cwd);
+  assert.equal(applied.status, 0, applied.stderr);
+  const payload = JSON.parse(applied.stdout);
+  assert.ok(payload.added.allow.includes("vercel env add"));
+
+  const appliedAgain = run(["policy", "preset", "vercel", "--json"], cwd);
+  assert.equal(appliedAgain.status, 0, appliedAgain.stderr);
+  assert.deepEqual(JSON.parse(appliedAgain.stdout).added.allow, []);
+
+  const policy = JSON.parse(run(["policy", "show", "--json"], cwd).stdout);
+  assert.ok(policy.allow.includes("keyrail sync vercel-env"));
+  assert.ok(policy.requireConfirm.includes("keyrail sync vercel-env --target production"));
 });
 
 test("policy and audit commands expose configured rules and run decisions", async () => {

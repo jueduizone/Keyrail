@@ -58,6 +58,9 @@ Keyrail 的目标是消除这种歧义，同时不要求协作者也必须安装
 - 通过 `status --json` 给 Agent 结构化上下文
 - 部署前用 `run --dry-run` 检查会注入哪些环境变量、缺哪些 key，不执行真实命令
 - 提供 `keyrail deploy vercel` 作为 Vercel 部署快捷入口
+- 提供 `keyrail sync vercel-env` 预览和同步 Vercel 环境变量映射，支持自定义 env alias
+- 提供 `keyrail policy preset <name>` 套用常见部署/API 工作流策略
+- policy 拒绝或需要确认时，输出可直接执行的修复步骤
 - 提供本地图形界面，方便非技术用户管理
 
 ## 安装
@@ -205,6 +208,18 @@ keyrail status --json
 
 `keyrail sync vercel-env` 会把当前项目已解析的 secrets（不包括只用于认证的 `vercel` token）通过 `vercel env add <ENV_NAME> <target> --project <project>` 同步到 Vercel。默认 target 会把 `local/dev/development` 映射为 `development`，`prod/production` 映射为 `production`，`preview/staging` 映射为 `preview`；也可以用 `--target` 覆盖。使用 `--dry-run` 可只查看环境变量名不写入，`--json` 可给 Agent/CI 消费，`--project` 可覆盖 Vercel project，`--yes` 会传给 Vercel。Keyrail 会 redaction 子进程输出，并在 audit 里记录 synced/missing/failed env names，不保存明文值。
 
+Policy preset 用于常见工作流，不需要用户手写一大段 shell policy：
+
+```bash
+keyrail policy preset                 # 列出 presets
+keyrail policy preset vercel --show   # 查看规则
+keyrail policy preset vercel          # 套用 Vercel deploy/env-sync 规则
+keyrail policy preset cloudflare-api
+keyrail policy preset github-read
+```
+
+`keyrail run` 被 policy 拒绝或需要确认时，stderr 会包含结构化 `nextSteps`。`keyrail status --json` 和本地 UI 也会展示最近一次 denied/confirmation-required audit 的修复建议，例如 `keyrail policy allow-last`、精确的 `keyrail policy allow -- <command>`、相关 preset，或 `keyrail run --yes -- <command>`。
+
 ## 本地 UI
 
 `keyrail ui` 会启动一个本地浏览器管理界面，适合不想编辑 JSON 或 YAML 的用户。
@@ -216,8 +231,10 @@ keyrail status --json
 - active context
 - 已绑定服务
 - key 是否 ready
-- Agent 命令提示
 - 项目配置和 audit 视图
+- env alias 标签，例如 `CLOUDFLARE_STREAM_API_TOKEN`
+- Vercel env sync 面板：认证状态、target、映射、safe dry-run 命令
+- 最近一次 policy denied/confirmation-required 的修复步骤
 
 UI 默认绑定 `127.0.0.1`，启动时会输出带 token 的 URL。
 

@@ -47,7 +47,7 @@ keyrail attach cloudflare-stream-api-token soloship/cloudflare-stream-api-token 
 
 Routing should store both the service reference and the target env name. Status output should show the alias explicitly.
 
-Progress: implemented `keyrail attach <service> <name> --env <ENV_NAME>`. Project routing stores `{ reference, envName }` without raw values, while legacy `context.secrets` string references remain valid. Status, doctor, run dry-run, UI state, and audit output expose the alias metadata.
+Progress: implemented `keyrail attach <service> <name> --env <ENV_NAME>`. Project routing stores `{ reference, envName }` without raw values, while legacy `context.secrets` string references remain valid. Status, doctor, run dry-run, UI state, UI service rows, and audit output expose the alias metadata.
 
 ### 3. First-Class Vercel Env Sync
 
@@ -67,7 +67,7 @@ keyrail sync vercel-env CLOUDFLARE_STREAM_API_TOKEN --from cloudflare-stream-api
 
 This should avoid printing raw values, redact subprocess output, and ideally support dry-run/audit.
 
-Progress: implemented `keyrail sync vercel-env`. It resolves current project secrets, excludes the attached `vercel` token from the sync payload, writes values to `vercel env add` through stdin, supports `--dry-run`, `--json`, `--target`, `--project`, and `--yes`, redacts child-process output, and audits synced/missing/failed env names. Default Vercel target maps `local/dev/development` to `development`, `prod/production` to `production`, and `preview/staging` to `preview`.
+Progress: implemented `keyrail sync vercel-env`. It resolves current project secrets, excludes the attached `vercel` token from the sync payload, writes values to `vercel env add` through stdin, supports `--dry-run`, `--json`, `--target`, `--project`, and `--yes`, redacts child-process output, and audits synced/missing/failed env names. Default Vercel target maps `local/dev/development` to `development`, `prod/production` to `production`, and `preview/staging` to `preview`. `status --json` and the local UI now expose a Vercel env sync panel with auth status, target, mappings, alias flags, and a copyable dry-run command.
 
 ## Policy UX
 
@@ -75,18 +75,14 @@ Progress: implemented `keyrail sync vercel-env`. It resolves current project sec
 
 `keyrail run -- /bin/zsh -lc '...'` is currently hard to allow because policy matching compares normalized command prefixes and rejects shell control tokens when they are passed as separate argv tokens. Real deployment flows often include `export`, pipes, variable references, curl headers, and deploy CLI commands.
 
-Target directions:
+Implemented directions:
 
-- Add policy presets for common safe operations:
+- `keyrail policy preset vercel` adds Vercel deploy/env inspection and keeps production env sync confirmation-gated.
+- `keyrail policy preset cloudflare-api` allows common Wrangler/API calls while denying destructive Cloudflare deletion commands.
+- `keyrail policy preset github-read` allows read-only GitHub/git discovery and keeps destructive repo operations denied.
+- `keyrail run` remediation, `status --json`, and the UI now recommend exact narrow allows, `allow-last`, or a relevant preset after denied audit entries.
 
-  ```text
-  allow vercel env add
-  allow curl api.cloudflare.com
-  allow npm run <script>
-  ```
-
-- Add host-aware/network-aware presets rather than requiring full shell strings.
-- Prefer structured sync commands for common deploy flows so users do not need to allow arbitrary shell wrappers.
+Still a future direction: host-aware/network-aware policy beyond string prefix matching.
 
 ### Safer Policy Entry
 
@@ -141,11 +137,11 @@ P0:
 
 P1:
 
-- Improve policy presets for deployment and API workflows.
+- Improve policy presets for deployment and API workflows. Implemented with `vercel`, `cloudflare-api`, and `github-read` presets.
 - Add `policy allow-last`. Implemented.
 - Clarify `run` vs `use` in CLI help and docs. Implemented.
 
 P2:
 
-- UI support for env aliases and Vercel sync mappings.
-- Guided repair when a command is denied by policy.
+- UI support for env aliases and Vercel sync mappings. Implemented.
+- Guided repair when a command is denied by policy. Implemented in stderr `nextSteps`, `status --json`, and UI policy repair.
