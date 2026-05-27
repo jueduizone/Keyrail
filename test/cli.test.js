@@ -65,7 +65,7 @@ test("run dry-run reports injected and missing env vars without executing", asyn
   assert.match(result.stdout, /OPENAI_API_KEY/);
   assert.match(result.stdout, /Missing:/);
   assert.match(result.stdout, /STRIPE_API_KEY/);
-  assert.match(result.stdout, /keyrail attach stripe demo-stripe --value/);
+  assert.match(result.stdout, /keyrail auth add stripe demo-stripe --value-stdin/);
   assert.doesNotMatch(result.stdout, /DUMMY_DRY_RUN_OPENAI_TOKEN/);
   await assert.rejects(stat(markerPath), { code: "ENOENT" });
 });
@@ -154,7 +154,14 @@ test("attach status and detach provide the human-friendly service routing workfl
   assert.equal(payload.deployment.context.name, "local");
   assert.equal(payload.deployment.services[0].envName, "VERCEL_TOKEN");
   assert.equal(payload.deployment.services[0].state, "missing");
-  assert.match(payload.deployment.nextCommand, /keyrail attach vercel demo-vercel --value/);
+  assert.match(payload.deployment.nextCommand, /keyrail deploy vercel --dry-run/);
+  assert.ok(payload.nextSteps.some((step) => step.command === "keyrail deploy vercel --dry-run"));
+  assert.ok(payload.nextSteps.some((step) => step.command === "keyrail attach vercel demo-vercel"));
+
+  const human = run(["status"], cwd);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Next steps:/);
+  assert.match(human.stdout, /keyrail deploy vercel --dry-run/);
 
   const detach = run(["detach", "vercel"], cwd);
   assert.equal(detach.status, 0, detach.stderr);
@@ -189,13 +196,32 @@ test("deploy vercel reports exact remediation when VERCEL_TOKEN is missing", asy
   const unattached = run(["deploy", "vercel", "--dry-run"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.notEqual(unattached.status, 0);
   assert.match(unattached.stderr, /VERCEL_TOKEN is not configured/);
-  assert.match(unattached.stderr, /keyrail attach vercel <reference> --value-stdin/);
+  assert.match(unattached.stderr, /keyrail deploy vercel --dry-run/);
+  assert.match(unattached.stderr, /keyrail auth add vercel <name> --value-stdin/);
+  assert.match(unattached.stderr, /keyrail attach vercel <name>/);
 
   assert.equal(run(["attach", "vercel", "demo-vercel"], cwd, { KEYRAIL_HOME: keyrailHome }).status, 0);
   const missingValue = run(["deploy", "vercel", "--dry-run"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.notEqual(missingValue.status, 0);
   assert.match(missingValue.stderr, /VERCEL_TOKEN is not configured/);
-  assert.match(missingValue.stderr, /keyrail attach vercel demo-vercel --value-stdin/);
+  assert.match(missingValue.stderr, /keyrail deploy vercel --dry-run/);
+  assert.match(missingValue.stderr, /keyrail attach vercel demo-vercel/);
+});
+
+test("status nextSteps include provider-specific setup for common services", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-status-nextsteps-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "github", "demo-github"], cwd).status, 0);
+  assert.equal(run(["attach", "supabase", "demo-supabase"], cwd).status, 0);
+  assert.equal(run(["attach", "openai", "demo-openai"], cwd).status, 0);
+
+  const status = run(["status", "--json"], cwd);
+  assert.equal(status.status, 0, status.stderr);
+  const commands = JSON.parse(status.stdout).nextSteps.map((step) => step.command);
+  assert.ok(commands.includes("keyrail auth add github demo-github --value-stdin"));
+  assert.ok(commands.includes("keyrail auth add supabase demo-supabase --value-stdin"));
+  assert.ok(commands.includes("keyrail run --dry-run -- supabase db push"));
+  assert.ok(commands.includes("keyrail auth add openai demo-openai --value-stdin"));
 });
 
 test("attach and run work without project init or project files", async () => {
@@ -459,7 +485,7 @@ test("missing-secret remediation prefers suggested attach commands", async () =>
   const unattached = run(["deploy", "vercel", "--dry-run"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.notEqual(unattached.status, 0);
   assert.match(unattached.stderr, /VERCEL_TOKEN is not configured/);
-  assert.match(unattached.stderr, /keyrail attach vercel preview --value-stdin/);
+  assert.match(unattached.stderr, /keyrail attach vercel preview/);
   assert.doesNotMatch(unattached.stderr, /--value \.\.\./);
   assert.match(unattached.stderr, /"nextSteps"/);
 });
@@ -531,6 +557,50 @@ test("with injects a named service account into a normal child command", async (
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\[REDACTED\]/);
   assert.doesNotMatch(result.stdout, /DUMMY_WITH_GITHUB_TOKEN/);
+});
+
+test("GitHub policy failures recommend with/auth/attach remediation", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-github-remediation-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "github", "personal"], cwd).status, 0);
+
+  const denied = run(["run", "--dry-run", "--", "git", "push"], cwd);
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /POLICY_DENIED/);
+  assert.match(denied.stderr, /keyrail with github personal -- git push/);
+  assert.match(denied.stderr, /keyrail auth add github personal --value-stdin/);
+  assert.match(denied.stderr, /keyrail attach github personal/);
+});
+
+test("Supabase missing value remediation uses stdin setup and keyrail run", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-supabase-remediation-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "supabase", "demo-supabase"], cwd).status, 0);
+
+  const result = run(["run", "--dry-run", "--", "supabase", "db", "push"], cwd);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /SUPABASE_ACCESS_TOKEN/);
+  assert.match(result.stdout, /keyrail auth add supabase demo-supabase --value-stdin/);
+
+  const status = run(["status", "--json"], cwd);
+  assert.equal(status.status, 0, status.stderr);
+  const commands = JSON.parse(status.stdout).nextSteps.map((step) => step.command);
+  assert.ok(commands.includes("keyrail run --dry-run -- supabase db push"));
+});
+
+test("README troubleshooting indexes common Keyrail failures", async () => {
+  const readme = await readFile(path.resolve("README.md"), "utf8");
+  assert.match(readme, /## Troubleshooting/);
+  for (const term of [
+    "POLICY_DENIED",
+    "CONFIRMATION_REQUIRED",
+    "IDENTITY_MISMATCH",
+    "SECRET_NOT_FOUND",
+    "embedded credentials",
+    "GitHub 403"
+  ]) {
+    assert.match(readme, new RegExp(term));
+  }
 });
 
 test("agent skill documents current state and private repo bootstrap", async () => {

@@ -529,12 +529,20 @@ async function useCommand(args, flags, passthrough) {
   const profile = await readProfile();
   const reference = flags.reference ?? profile.services[service]?.reference;
   if (!reference) {
-    throw new KeyrailError("PROFILE_NOT_FOUND", `No ${service} account configured. Run keyrail auth add ${service} <name> --value-stdin`);
+    throw new KeyrailError(
+      "PROFILE_NOT_FOUND",
+      `No ${service} account configured. Run keyrail auth add ${service} <name> --value-stdin`,
+      { nextSteps: profileMissingNextSteps(service, command) }
+    );
   }
 
   const token = await new GlobalSecretStore().get(reference);
   if (!token) {
-    throw new KeyrailError("SECRET_NOT_FOUND", `No value found for ${reference}. Run keyrail auth add ${service} ${reference} --value-stdin`);
+    throw new KeyrailError(
+      "SECRET_NOT_FOUND",
+      `No value found for ${reference}. Run keyrail auth add ${service} ${reference} --value-stdin`,
+      { nextSteps: profileValueMissingNextSteps(service, reference, command) }
+    );
   }
 
   const env = await envForServiceCommand(service, token, command);
@@ -863,6 +871,14 @@ async function buildStatusPayload(state, flags = {}) {
   const missingCount = services.filter((service) => !service.configured).length;
   const nextCommand = nextRecommendedCommand(services, missingCount);
   const suggestions = await buildStatusSuggestions(state, services);
+  const missing = services.filter((service) => !service.configured);
+  const nextSteps = buildStatusNextSteps({
+    state,
+    verification: state.verification,
+    services,
+    missing,
+    suggestions
+  });
 
   return {
     project: state.manifest.project,
@@ -891,7 +907,8 @@ async function buildStatusPayload(state, flags = {}) {
       verified: true,
       instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
     },
-    suggestions
+    suggestions,
+    nextSteps
   };
 }
 
@@ -957,6 +974,10 @@ function printDeploymentStatus(payload) {
       console.log(`- ${suggestion.command}`);
     }
   }
+  if (payload.nextSteps?.length) {
+    console.log("Next steps:");
+    for (const step of payload.nextSteps) console.log(`- ${step.command} (${step.reason})`);
+  }
   console.log(`Next: ${payload.deployment.nextCommand}`);
 }
 
@@ -1019,7 +1040,8 @@ function nextRecommendedCommand(services, missingCount) {
   if (!services.length) return "keyrail attach <service> <reference> --value-stdin";
   if (missingCount > 0) {
     const firstMissing = services.find((service) => !service.configured);
-    return `keyrail attach ${firstMissing.service} ${firstMissing.reference} --value-stdin`;
+    if (firstMissing.service === "vercel") return "keyrail deploy vercel --dry-run";
+    return setupCommandForSecret(firstMissing);
   }
   if (services.some((service) => service.service === "vercel")) return "keyrail deploy vercel --dry-run";
   return "keyrail run --dry-run -- <command>";
@@ -1044,28 +1066,26 @@ async function missingSecretsError(missing, state = null) {
 }
 
 function remediationMessageForSecret(secret) {
-  return `Run keyrail attach ${secret.provider} ${secret.reference} --value-stdin or keyrail doctor.`;
+  if (secret.provider === "vercel") {
+    return `Run keyrail deploy vercel --dry-run to inspect readiness, then keyrail auth add vercel ${secret.reference} --value-stdin to configure ${secret.envName ?? envNameForProvider(secret.provider)}.`;
+  }
+  return `Run ${setupCommandForSecret(secret)} to configure ${secret.envName ?? envNameForProvider(secret.provider)}, or run keyrail doctor.`;
 }
 
 async function remediationForMissingSecret(secret, state) {
   const suggestions = await suggestionsForService(secret.provider, state);
   const exact = suggestions.find((suggestion) => suggestion.reference === secret.reference);
+  const nextSteps = missingSecretNextSteps(secret);
   if (exact) {
     return {
-      message: `Run ${exact.command} --value-stdin, then retry.`,
-      nextSteps: [
-        nextStep(`${exact.command} --value-stdin`, `Attach and store ${secret.envName}.`),
-        nextStep("keyrail doctor", "Verify project routing and linked-service readiness.")
-      ]
+      message: `Run ${nextSteps[0].command}, then retry.`,
+      nextSteps
     };
   }
 
   return {
     message: remediationMessageForSecret(secret),
-    nextSteps: [
-      nextStep(`keyrail attach ${secret.provider} ${secret.reference} --value-stdin`, `Store ${secret.envName} for the attached reference.`),
-      nextStep("keyrail doctor", "Verify project routing and linked-service readiness.")
-    ]
+    nextSteps
   };
 }
 
@@ -1073,31 +1093,42 @@ async function remediationForUnattachedSecret(provider, state) {
   const envName = envNameForProvider(provider);
   const suggestions = await suggestionsForService(provider, state);
   if (suggestions.length === 1) {
-    const command = `${suggestions[0].command} --value-stdin`;
+    const command = attachCommandForProvider(provider, suggestions[0].reference);
     return {
       message: `Run ${command}, then retry.`,
       nextSteps: [
-        nextStep(command, `Attach the available ${provider} account to this project.`),
-        nextStep("keyrail doctor", "Verify linked-service readiness.")
+        nextStep(command, attachReasonForProvider(provider, envName)),
+        nextStep(verifyCommandForProvider(provider), verifyReasonForProvider(provider))
       ]
     };
   }
 
   if (suggestions.length > 1) {
     return {
-      message: `Choose an account with keyrail attach ${provider} <reference> --value-stdin, then retry.`,
+      message: `Choose an account with ${attachCommandForProvider(provider, "<reference>")}, then retry.`,
       nextSteps: [
-        ...suggestions.map((suggestion) => nextStep(`${suggestion.command} --value-stdin`, `Attach ${provider}:${suggestion.reference}.`)),
-        nextStep("keyrail doctor", "Verify linked-service readiness.")
+        ...suggestions.map((suggestion) => nextStep(attachCommandForProvider(provider, suggestion.reference), `Attach ${provider}:${suggestion.reference}.`)),
+        nextStep(verifyCommandForProvider(provider), verifyReasonForProvider(provider))
+      ]
+    };
+  }
+
+  if (provider === "vercel") {
+    return {
+      message: "Run keyrail deploy vercel --dry-run to inspect readiness, then add and attach a Vercel token.",
+      nextSteps: [
+        nextStep("keyrail deploy vercel --dry-run", "Inspect Vercel deployment readiness and token routing."),
+        nextStep("keyrail auth add vercel <name> --value-stdin", `Save ${envName} from stdin as a reusable local Vercel account.`),
+        nextStep("keyrail attach vercel <name>", "Attach the Vercel account to this project.")
       ]
     };
   }
 
   return {
-    message: `Run keyrail attach ${provider} <reference> --value-stdin, then retry.`,
+    message: `Run ${setupCommandForProvider(provider, "<name>")} and attach it with ${attachCommandForProvider(provider, "<name>")}, then retry.`,
     nextSteps: [
-      nextStep(`keyrail attach ${provider} <reference> --value-stdin`, `Attach and store ${envName}.`),
-      nextStep("keyrail auth add <service> <name> --value-stdin", "Save a reusable local account before attaching if needed.")
+      nextStep(setupCommandForProvider(provider, "<name>"), `Save ${envName} from stdin as a reusable local ${provider} account.`),
+      nextStep(attachCommandForProvider(provider, "<name>"), attachReasonForProvider(provider, envName))
     ]
   };
 }
@@ -1111,6 +1142,20 @@ async function remediationForPolicyDecision(decision, command, state, flags = {}
       nextSteps: [
         nextStep(confirmCommand, "Confirm this command for the current context."),
         nextStep("keyrail doctor", "Review identity, context risk, and policy guidance.")
+      ]
+    };
+  }
+
+  const provider = providerForCommand(normalized);
+  if (provider === "github") {
+    const action = githubActionForCommand(normalized);
+    const name = state.context.secrets.github ?? "<name>";
+    return {
+      message: `Route GitHub ${action} through a saved account or add a narrow policy rule with ${policyActionForCommand(normalized, state.manifest.policy)}.`,
+      nextSteps: [
+        nextStep(githubWithCommand(name, normalized), `Retry GitHub ${action} with GITHUB_TOKEN/GH_TOKEN injected.`),
+        nextStep(`keyrail auth add github ${name} --value-stdin`, "Save a GitHub token from stdin if the account is not configured."),
+        nextStep(attachCommandForProvider("github", name), "Attach the GitHub account to this project if it should be the default.")
       ]
     };
   }
@@ -1150,25 +1195,118 @@ async function suggestionsForService(service, state) {
 }
 
 function buildDoctorNextSteps({ state, verification, services, missing, suggestions }) {
+  return buildStatusNextSteps({ state, verification, services, missing, suggestions });
+}
+
+function buildStatusNextSteps({ state, verification, services, missing, suggestions }) {
   const steps = [];
   if (!verification.verified) {
-    steps.push(nextStep("keyrail status --json", "Inspect the active project identity and configured repo."));
+    steps.push(nextStep("keyrail doctor", "Review the identity mismatch before routing credentials."));
   }
   for (const suggestion of suggestions) {
-    steps.push(nextStep(suggestion.command, suggestion.reason));
+    steps.push(nextStep(attachCommandForProvider(suggestion.service, suggestion.reference), suggestion.reason));
   }
   for (const secret of missing) {
-    const envName = secret.envName ?? envNameForProvider(secret.provider);
-    steps.push(nextStep(`keyrail attach ${secret.provider} ${secret.reference} --value-stdin`, `Store ${envName} for the linked ${secret.provider} reference.`));
+    steps.push(...missingSecretNextSteps(secret));
+    const provider = secret.provider ?? secret.service;
+    if (provider === "supabase") steps.push(nextStep("keyrail run --dry-run -- supabase db push", "Check Supabase policy and injected env var names before execution."));
   }
   if (!services.length && !suggestions.length) {
-    steps.push(nextStep("keyrail attach <service> <reference> --value-stdin", "Attach the service account this project needs."));
+    steps.push(nextStep("keyrail auth add <service> <name> --value-stdin", "Save the service account this project needs without exposing the secret."));
+    steps.push(nextStep("keyrail attach <service> <name>", "Attach the saved service account to this project."));
   }
   steps.push(nextStep("keyrail run --dry-run -- <command>", "Check policy and injected env var names before execution."));
   if (services.some((service) => service.service === "vercel")) {
     steps.push(nextStep("keyrail deploy vercel --dry-run", "Validate the Vercel deployment path."));
   }
   return dedupeNextSteps(steps);
+}
+
+function setupCommandForSecret(secret) {
+  return setupCommandForProvider(secret.provider ?? secret.service, secret.reference);
+}
+
+function setupCommandForProvider(provider, reference) {
+  if (provider === "vercel") return "keyrail deploy vercel --dry-run";
+  return `keyrail auth add ${provider} ${reference} --value-stdin`;
+}
+
+function missingSecretNextSteps(secret) {
+  const provider = secret.provider ?? secret.service;
+  if (provider === "vercel") {
+    return [
+      nextStep("keyrail deploy vercel --dry-run", `Validate Vercel deployment readiness and ${secret.envName ?? envNameForProvider(provider)} routing.`),
+      nextStep(`keyrail auth add vercel ${secret.reference} --value-stdin`, `Store ${secret.envName ?? envNameForProvider(provider)} from stdin for the linked Vercel reference.`),
+      nextStep(attachCommandForProvider("vercel", secret.reference), "Attach the Vercel token reference used by this project.")
+    ];
+  }
+  return [
+    nextStep(setupCommandForSecret(secret), setupReasonForSecret(secret)),
+    nextStep(verifyCommandForProvider(provider), verifyReasonForProvider(provider))
+  ];
+}
+
+function attachCommandForProvider(provider, reference) {
+  if (provider === "vercel") return `keyrail attach vercel ${reference}`;
+  return `keyrail attach ${provider} ${reference}`;
+}
+
+function setupReasonForSecret(secret) {
+  const provider = secret.provider ?? secret.service;
+  const envName = secret.envName ?? envNameForProvider(provider);
+  if (provider === "vercel") return `Validate Vercel deployment readiness and ${envName} routing.`;
+  return `Store ${envName} for the linked ${provider} reference from stdin.`;
+}
+
+function attachReasonForProvider(provider, envName) {
+  if (provider === "vercel") return `Attach the Vercel account so ${envName} can be routed for deploys.`;
+  return `Attach the saved ${provider} account so ${envName} can be routed for commands.`;
+}
+
+function verifyCommandForProvider(provider) {
+  if (provider === "vercel") return "keyrail deploy vercel --dry-run";
+  if (provider === "supabase") return "keyrail run --dry-run -- supabase db push";
+  return "keyrail doctor";
+}
+
+function verifyReasonForProvider(provider) {
+  if (provider === "vercel") return "Validate linked-service readiness for Vercel deploys.";
+  if (provider === "supabase") return "Validate Supabase policy and credential routing.";
+  return "Verify project routing and linked-service readiness.";
+}
+
+function profileMissingNextSteps(service, command) {
+  const name = "<name>";
+  const steps = [
+    nextStep(`keyrail auth add ${service} ${name} --value-stdin`, `Save ${envNameForProvider(service)} from stdin.`)
+  ];
+  if (service === "github") steps.push(nextStep(githubWithCommand(name, normalizeCommand(command)), "Retry the GitHub command with token injection."));
+  return steps;
+}
+
+function profileValueMissingNextSteps(service, reference, command) {
+  const steps = [
+    nextStep(`keyrail auth add ${service} ${reference} --value-stdin`, `Store ${envNameForProvider(service)} from stdin.`)
+  ];
+  if (service === "github") steps.push(nextStep(githubWithCommand(reference, normalizeCommand(command)), "Retry the GitHub command with token injection."));
+  return steps;
+}
+
+function providerForCommand(command) {
+  if (/^(git\s+(push|clone|fetch|pull)|gh\s+|github\b)/.test(command) || /github\.com[:/]/i.test(command)) return "github";
+  if (/^vercel\b/.test(command)) return "vercel";
+  if (/^supabase\b/.test(command)) return "supabase";
+  return null;
+}
+
+function githubActionForCommand(command) {
+  if (command.startsWith("git push")) return "push";
+  if (command.startsWith("git clone") || command.startsWith("gh repo clone")) return "clone";
+  return "auth";
+}
+
+function githubWithCommand(reference, command) {
+  return `keyrail with github ${reference} -- ${command}`;
 }
 
 function buildPolicyGuidance(state) {

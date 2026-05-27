@@ -258,6 +258,17 @@ For complex commands, prefer passing the full policy pattern after `--` so the s
 keyrail policy allow -- "/bin/zsh -lc 'printf ... | npx vercel env add ...'"
 ```
 
+## Troubleshooting
+
+Use `keyrail doctor` for a human checklist or `keyrail doctor --json` for structured `checks` and `nextSteps`. Common errors and fixes:
+
+- `POLICY_DENIED`: run `keyrail doctor`, then either route the command through Keyrail (`keyrail run --dry-run -- <command>`) or add a narrow rule with `keyrail policy allow -- <command>`.
+- `CONFIRMATION_REQUIRED`: retry after verifying the project/context with `--yes` or `KEYRAIL_CONFIRM=1`, for example `keyrail deploy vercel --prod --yes`.
+- `IDENTITY_MISMATCH`: inspect `keyrail status --json` and update the project binding before attaching credentials to the wrong repo or package.
+- `SECRET_NOT_FOUND`: store the expected env var value from stdin, for example `keyrail auth add openai <name> --value-stdin`, then attach it with `keyrail attach <service> <name>`.
+- embedded credentials in Git remote: remove tokens from the remote URL and use `keyrail with github <name> -- git clone https://github.com/<owner>/<repo>.git` or `keyrail with github <name> -- git push`.
+- GitHub 403 or wrong account: check which GitHub account is attached with `keyrail status --json`, then use `keyrail with github <name> -- git push` or save the intended account with `keyrail auth add github <name> --value-stdin`.
+
 ## Development
 
 ```bash
