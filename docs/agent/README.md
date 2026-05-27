@@ -1,9 +1,11 @@
 # Agent Integration
 
-Keyrail supports agents in two layers:
+Keyrail supports agents in an MCP-first model:
 
-1. Skill: lightweight instructions for agents.
-2. MCP: future structured tools for deeper integration.
+1. Prefer official provider MCP tools for provider-native API work.
+2. Use Keyrail for local project commands that need project-specific env vars.
+3. Skill: lightweight instructions for agents.
+4. MCP: future structured Keyrail tools for deeper integration.
 
 The current recommended integration is the skill in:
 
@@ -13,19 +15,24 @@ agents/keyrail/SKILL.md
 
 ## In an Existing Repository
 
+First classify the work:
+
+- GitHub issues/PRs/repo metadata, Vercel project/deployment logs, Supabase project API, Cloudflare API: use the official provider MCP when available.
+- `npm run ...`, `vercel deploy`, `supabase db push`, `curl ...`, deployment scripts, multi-service commands, env aliases, or env sync: use Keyrail.
+
 Agents should start with:
 
 ```bash
 keyrail status --json
 ```
 
-Then use:
+Then use this only when local shell execution needs project env routing:
 
 ```bash
 keyrail run -- <command>
 ```
 
-for service commands.
+For provider-native operations that do not require local shell execution, prefer the official MCP.
 
 If `status --json` shows that a needed service is missing, agents should check saved accounts:
 
@@ -59,9 +66,9 @@ keyrail status --json
 
 Keyrail stores that project routing in the user's local Keyrail config by default, not in the repository.
 
-## Future MCP Tools
+## Future Keyrail MCP Tools
 
-Planned tools:
+Keyrail may also expose its own MCP tools so agents can inspect local routing without memorizing CLI syntax. Planned tools:
 
 - `keyrail.status`
 - `keyrail.list_services`
@@ -69,4 +76,4 @@ Planned tools:
 - `keyrail.run`
 - `keyrail.handoff`
 
-The default MCP mode should expose read-only tools first. `run` and `with` should require explicit enablement.
+The default Keyrail MCP mode should expose read-only tools first. `run` and `with` should require explicit enablement. Official provider MCPs should remain the preferred path for provider-native operations.

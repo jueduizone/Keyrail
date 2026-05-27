@@ -4,11 +4,32 @@
 
 [English](README.md) · [中文教程](docs/tutorial.zh-CN.md) · [Tutorial](docs/tutorial.md) · [产品反馈](docs/product-feedback.md)
 
-Keyrail 是一个本地凭据路由器。你可能在一台电脑上有很多工程，每个工程使用不同的 GitHub、Vercel、Supabase、OpenAI、Anthropic、Stripe 或其他服务 key。Keyrail 给 Agent 一个简单规则：
+Keyrail 是一个本地凭据路由器。它采用 **MCP-first** 定位：如果官方 provider MCP 能完成任务，Agent 应该优先用官方 MCP，而不是直接处理 provider token。Keyrail 负责 MCP 不自然覆盖的本地工作流：项目 shell 命令、多服务 env 注入、env alias、部署环境变量同步。
+
+你可能在一台电脑上有很多工程，每个工程使用不同的 GitHub、Vercel、Supabase、OpenAI、Anthropic、Stripe、Cloudflare 或其他服务 key。Keyrail 给 Agent 一个简单规则：
 
 > 先识别当前本地工程，再只使用这个工程绑定的服务账号。
 
-它不是完整的 secret manager。它负责把“本地 repo”“服务账号引用”和“Agent 执行的命令”连接起来。
+它不是完整的 secret manager，也不应该替代官方 provider MCP 做原生 API 操作。它负责把“本地 repo”“服务账号引用”和“Agent 执行的命令”连接起来。
+
+## MCP-first 定位
+
+provider 原生操作优先使用官方 MCP：
+
+- GitHub MCP：issue、PR、repo metadata、GitHub API 操作
+- Vercel MCP：项目 metadata、deployment logs、Vercel 原生操作
+- Supabase MCP：数据库和项目 API 操作
+- Cloudflare MCP：Cloudflare 原生 API 操作
+
+需要本地执行上下文时使用 Keyrail：
+
+- `npm run deploy`、`vercel deploy`、`supabase db push`、`curl ...` 或其他项目 shell 命令
+- 一个 child process 同时需要多个服务，例如 Vercel + Cloudflare + Supabase
+- 应用或 runtime 需要 env alias，例如 `CLOUDFLARE_STREAM_API_TOKEN`
+- 需要把本地 Keyrail secret 同步到 Vercel env
+- 某个服务还没有可靠官方 MCP
+
+一句话：**服务 API 用 MCP，本地项目命令和 env 路由用 Keyrail。**
 
 ## 最简单的流程
 
@@ -125,7 +146,7 @@ keyrail run --with stripe,cloudflare-stream-api-token -- npm run deploy
 keyrail sync vercel-env --dry-run --target preview --project acme-web
 ```
 
-`keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>` 会在同一个子进程里注入当前项目已绑定的 secrets 和额外指定的用户级账号/引用。dry-run 的 JSON 和文本输出只列出会注入或缺失的环境变量名，包括 alias，不打印明文 secret。
+`keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>` 会在同一个子进程里注入当前项目已绑定的 secrets 和额外指定的用户级账号/引用。dry-run 的 JSON 和文本输出只列出会注入或缺失的环境变量名，包括 alias，不打印明文 secret。如果任务可以通过官方 MCP 完成且不需要本地 shell，就优先用 MCP。
 
 打开 UI：
 
@@ -162,7 +183,7 @@ keyrail run -- gh repo view
 keyrail status --json
 ```
 
-返回内容会包含项目身份、active context、已绑定服务、对应环境变量名、key 是否已配置、当前 repo 可直接绑定但尚未绑定的账号建议（`suggestions`），以及提示 Agent 使用 `keyrail run -- <command>`。
+返回内容会包含项目身份、active context、已绑定服务、对应环境变量名、key 是否已配置、当前 repo 可直接绑定但尚未绑定的账号建议（`suggestions`），以及 MCP-first 指令：provider 原生操作优先用官方 MCP，本地项目命令才用 `keyrail run -- <command>`。
 
 示例：
 
@@ -199,7 +220,21 @@ keyrail status --json
   },
   "agent": {
     "verified": true,
-    "instruction": "Use keyrail run -- <command> so this project receives only its linked service keys."
+    "instruction": "Prefer official MCP tools for provider-native API work. Use keyrail run -- <command> when a local project command needs this project's linked service keys."
+  },
+  "mcp": {
+    "strategy": "mcp-first",
+    "useKeyrailFor": [
+      "local project commands that read env vars",
+      "multi-service child-process env injection",
+      "env aliases expected by app/runtime code",
+      "syncing resolved project secrets to deployment env stores"
+    ],
+    "preferProviderMcpFor": [
+      "provider-native API reads and writes",
+      "deployment logs and service metadata",
+      "issue/PR/project management when the official MCP is available"
+    ]
   }
 }
 ```

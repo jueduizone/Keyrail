@@ -1,11 +1,19 @@
 ---
 name: keyrail
-description: Use Keyrail to identify local projects and route project-specific service keys for GitHub, Vercel, Supabase, OpenAI, Anthropic, Stripe, and similar developer services.
+description: Use Keyrail for MCP-first local project credential routing: prefer official provider MCP tools for provider-native API work, and use Keyrail when local project commands need project-specific env vars, multi-service injection, env aliases, or deployment env sync.
 ---
 
 # Keyrail Agent Skill
 
-Use this skill whenever you are working in a local repository that may need project-specific credentials.
+Use this skill whenever you are working in a local repository that may need project-specific credentials for local commands. Prefer official provider MCP tools for provider-native API work whenever they are available.
+
+## MCP-First Rule
+
+Before using Keyrail, classify the task:
+
+- Use official provider MCP tools for provider-native API work: GitHub issues/PRs/repo metadata, Vercel project/deployment metadata and logs, Supabase project/database API operations, Cloudflare API operations, and similar structured service actions.
+- Use Keyrail for local project commands that need env vars: `npm run ...`, `vercel deploy`, `supabase db push`, `curl ...`, scripts that combine multiple services, env aliases, and syncing local secrets into deployment env stores.
+- Do not use Keyrail merely to obtain a provider token when a safe official MCP can perform the operation directly.
 
 ## Repository Already Exists
 
@@ -15,13 +23,15 @@ Use this skill whenever you are working in a local repository that may need proj
    keyrail status --json
    ```
 
-2. If the project is verified, use:
+2. If the project is verified and the task requires local shell execution, use:
 
    ```bash
    keyrail run -- <command>
    ```
 
-   for GitHub, Vercel, Supabase, OpenAI, Anthropic, Stripe, cloud, and deployment commands.
+   for project commands that read env vars or need multiple service credentials in one child process.
+
+   If the task is provider-native and an official MCP is available, use that MCP instead.
 
 3. Never read, print, or copy raw secret values.
 

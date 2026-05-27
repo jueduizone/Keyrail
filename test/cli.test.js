@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -151,9 +151,9 @@ test("attach status and detach provide the human-friendly service routing workfl
   const payload = JSON.parse(status.stdout);
   assert.equal(payload.services[0].service, "vercel");
   assert.equal(payload.services[0].reference, "demo-vercel");
-  assert.equal(payload.root, cwd);
+  assert.equal(await realpath(payload.root), await realpath(cwd));
   assert.equal(payload.deployment.project.id, "demo");
-  assert.equal(payload.deployment.project.root, cwd);
+  assert.equal(await realpath(payload.deployment.project.root), await realpath(cwd));
   assert.equal(payload.deployment.context.name, "local");
   assert.equal(payload.deployment.services[0].envName, "VERCEL_TOKEN");
   assert.equal(payload.deployment.services[0].state, "missing");
@@ -322,6 +322,8 @@ test("attach and run work without project init or project files", async () => {
   assert.equal(status.status, 0, status.stderr);
   const payload = JSON.parse(status.stdout);
   assert.equal(payload.project.id, "zero-init-demo");
+  assert.equal(payload.mcp.strategy, "mcp-first");
+  assert.match(payload.agent.instruction, /Prefer official MCP tools/);
   assert.equal(payload.services[0].service, "openai");
   assert.equal(payload.services[0].configured, true);
 
@@ -667,6 +669,8 @@ test("Supabase missing value remediation uses stdin setup and keyrail run", asyn
 
 test("README troubleshooting indexes common Keyrail failures", async () => {
   const readme = await readFile(path.resolve("README.md"), "utf8");
+  assert.match(readme, /MCP-First Positioning/);
+  assert.match(readme, /MCP for service APIs, Keyrail for local project commands and env routing/);
   assert.match(readme, /## Troubleshooting/);
   for (const term of [
     "POLICY_DENIED",
@@ -683,6 +687,8 @@ test("README troubleshooting indexes common Keyrail failures", async () => {
 test("agent skill documents current state and private repo bootstrap", async () => {
   const skill = await readFile(path.resolve("agents/keyrail/SKILL.md"), "utf8");
   await stat(path.resolve("docs/agent/README.md"));
+  assert.match(skill, /MCP-First Rule/);
+  assert.match(skill, /official provider MCP/);
   assert.match(skill, /keyrail status --json/);
   assert.match(skill, /keyrail with github/);
   assert.match(skill, /keyrail auth list --json/);
@@ -715,7 +721,7 @@ test("sync vercel-env runs vercel env add with redacted output and audit", async
   const binDir = await mkdtemp(path.join(os.tmpdir(), "keyrail-vercel-bin-"));
   const logPath = path.join(cwd, "vercel-call.jsonl");
   const fakeVercel = path.join(binDir, "vercel");
-  await writeFile(fakeVercel, `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nconst chunks=[];\nfor await (const chunk of process.stdin) chunks.push(chunk);\nconst value=Buffer.concat(chunks).toString('utf8').trim();\nappendFileSync(process.env.VERCEL_LOG, JSON.stringify({ args: process.argv.slice(2), value, token: process.env.VERCEL_TOKEN }) + '\\n');\nconsole.log('added ' + value + ' using ' + process.env.VERCEL_TOKEN);\n`, { mode: 0o700 });
+  await writeFile(fakeVercel, `#!/usr/bin/env node\nconst { appendFileSync } = require('node:fs');\nconst chunks=[];\nprocess.stdin.on('data', (chunk) => chunks.push(chunk));\nprocess.stdin.on('end', () => {\n  const value=Buffer.concat(chunks).toString('utf8').trim();\n  appendFileSync(process.env.VERCEL_LOG, JSON.stringify({ args: process.argv.slice(2), value, token: process.env.VERCEL_TOKEN }) + '\\n');\n  console.log('added ' + value + ' using ' + process.env.VERCEL_TOKEN);\n});\n`, { mode: 0o700 });
   await chmod(fakeVercel, 0o700);
 
   run(["init", "--id", "demo", "--repo", "local"], cwd);

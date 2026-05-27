@@ -1225,7 +1225,22 @@ async function buildStatusPayload(state, flags = {}) {
     },
     agent: {
       verified: true,
-      instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
+      instruction: "Prefer official MCP tools for provider-native API work. Use keyrail run -- <command> when a local project command needs this project's linked service keys."
+    },
+    mcp: {
+      strategy: "mcp-first",
+      instruction: "Use official provider MCP servers for GitHub, Vercel, Supabase, Cloudflare, and similar native operations when available; use Keyrail for local shell commands, multi-service env injection, env aliases, and deployment env sync.",
+      useKeyrailFor: [
+        "local project commands that read env vars",
+        "multi-service child-process env injection",
+        "env aliases expected by app/runtime code",
+        "syncing resolved project secrets to deployment env stores"
+      ],
+      preferProviderMcpFor: [
+        "provider-native API reads and writes",
+        "deployment logs and service metadata",
+        "issue/PR/project management when the official MCP is available"
+      ]
     },
     suggestions,
     nextSteps,

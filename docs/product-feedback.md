@@ -2,6 +2,27 @@
 
 This document captures real usage feedback from a deployment workflow that needed GitHub, Vercel, Cloudflare Stream, and project-specific environment variables.
 
+## Product Positioning Update
+
+Keyrail should be MCP-first, not a replacement for official provider MCP servers.
+
+Use official MCPs for provider-native API work:
+
+- GitHub issues, PRs, repo metadata, and GitHub API actions
+- Vercel project metadata, deployment logs, and Vercel-native operations
+- Supabase project/database API operations
+- Cloudflare-native API operations when an official MCP is available
+
+Use Keyrail for local execution gaps MCP does not naturally cover:
+
+- local project commands that read env vars
+- one child process needing multiple service credentials
+- env aliases expected by app/runtime code
+- syncing local/project secrets into deployment env stores
+- long-tail services without reliable official MCP support
+
+The product language should be: **MCP for service APIs, Keyrail for local project commands and env routing.**
+
 ## Core Problems
 
 ### 1. Multiple Secrets Need One Child Process
@@ -115,9 +136,10 @@ Current split:
 
 Recommended documentation language:
 
-- Inside a project, prefer `keyrail run`.
+- For provider-native work, prefer official MCP.
+- Inside a project, prefer `keyrail run` only when a local command needs project env routing.
 - For one-off single-account commands, use `keyrail use` or `keyrail with`.
-- For multi-service commands, Keyrail needs one official path, likely `keyrail run --with ... -- <command>`.
+- For multi-service local commands, use `keyrail run --with ... -- <command>`.
 
 ## Stdin Safety
 

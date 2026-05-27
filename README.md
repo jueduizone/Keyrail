@@ -4,11 +4,32 @@
 
 [中文文档](README.zh-CN.md) · [Tutorial](docs/tutorial.md) · [中文教程](docs/tutorial.zh-CN.md) · [Product feedback](docs/product-feedback.md)
 
-Keyrail is a local credential router for coding agents. If one machine has many projects, and each project uses different GitHub, Vercel, Supabase, OpenAI, Anthropic, Stripe, or other service keys, Keyrail gives agents one simple rule:
+Keyrail is a local credential router for coding agents. It is **MCP-first**: when an official provider MCP can do the job, agents should use that MCP instead of handling provider tokens directly. Keyrail exists for the local workflows MCP does not naturally cover: project shell commands, multi-service env injection, env aliases, and deployment env sync.
+
+If one machine has many projects, and each project uses different GitHub, Vercel, Supabase, OpenAI, Anthropic, Stripe, Cloudflare, or other service keys, Keyrail gives agents one simple rule:
 
 > Identify the current local project, then use only the service accounts attached to that project.
 
-Keyrail is not a full secret manager. It is the local routing layer between a repo, named service accounts, and the commands an agent runs.
+Keyrail is not a full secret manager and should not replace official provider MCP servers for native API operations. It is the local routing layer between a repo, named service accounts, and the commands an agent runs.
+
+## MCP-First Positioning
+
+Use official MCP servers first for provider-native work:
+
+- GitHub MCP for issues, PRs, repository metadata, and GitHub API actions
+- Vercel MCP for project metadata, deployment logs, and Vercel-native operations
+- Supabase MCP for database/project API operations
+- Cloudflare MCP for Cloudflare-native API operations when available
+
+Use Keyrail when the agent needs local execution context:
+
+- `npm run deploy`, `vercel deploy`, `supabase db push`, `curl ...`, or other project shell commands
+- one child process needs multiple services at once, such as Vercel + Cloudflare + Supabase
+- app/runtime env names need aliases, such as `CLOUDFLARE_STREAM_API_TOKEN`
+- local Keyrail secrets need to be synced into Vercel env vars
+- a service has no reliable official MCP yet
+
+In short: **MCP for service APIs, Keyrail for local project commands and env routing.**
 
 ## Simple Flow
 
@@ -122,7 +143,7 @@ keyrail deploy vercel --prod --yes
 keyrail sync vercel-env --dry-run --target preview --project acme-web
 ```
 
-`keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>` injects the active project's attached services plus extra named service accounts or references into one child process. Dry-run JSON and human output list injected and missing env var names, including aliases, without printing raw secret values.
+`keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>` injects the active project's attached services plus extra named service accounts or references into one child process. Dry-run JSON and human output list injected and missing env var names, including aliases, without printing raw secret values. If the task can be done through an official MCP without local shell execution, prefer MCP instead.
 
 Open the local UI:
 
@@ -159,7 +180,7 @@ Tell agents to start with:
 keyrail status --json
 ```
 
-The response includes project identity, active context, linked services, env var names, configured/missing status, suggestions for relevant saved accounts that are not attached yet, and the instruction to use `keyrail run -- <command>`.
+The response includes project identity, active context, linked services, env var names, configured/missing status, suggestions for relevant saved accounts that are not attached yet, and an MCP-first instruction: provider-native work should use official MCP tools when available; local project commands should use `keyrail run -- <command>`.
 
 Example:
 
@@ -196,7 +217,21 @@ Example:
   },
   "agent": {
     "verified": true,
-    "instruction": "Use keyrail run -- <command> so this project receives only its linked service keys."
+    "instruction": "Prefer official MCP tools for provider-native API work. Use keyrail run -- <command> when a local project command needs this project's linked service keys."
+  },
+  "mcp": {
+    "strategy": "mcp-first",
+    "useKeyrailFor": [
+      "local project commands that read env vars",
+      "multi-service child-process env injection",
+      "env aliases expected by app/runtime code",
+      "syncing resolved project secrets to deployment env stores"
+    ],
+    "preferProviderMcpFor": [
+      "provider-native API reads and writes",
+      "deployment logs and service metadata",
+      "issue/PR/project management when the official MCP is available"
+    ]
   }
 }
 ```
