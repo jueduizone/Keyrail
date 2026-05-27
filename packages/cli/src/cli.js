@@ -8,6 +8,7 @@ import { GlobalSecretStore, createSecretBackend, envNameForProvider, getKeyrailC
 import {
   KeyrailError,
   MANIFEST_FILE,
+  denormalizeManifest,
   findProjectRoot,
   getContext,
   identifyProject,
@@ -16,6 +17,7 @@ import {
   removeContext,
   removeSecretReference,
   resolveActiveContextName,
+  setSecretAttachment,
   setSecretReference,
   upsertContext,
   validateManifest,
@@ -69,6 +71,8 @@ export async function main(argv) {
       return contextCommand(args, flags);
     case "policy":
       return policyCommand(args, flags, passthrough);
+    case "sync":
+      return syncCommand(args, flags);
     case "audit":
       return auditCommand(args, flags);
     case "ui":
@@ -160,6 +164,7 @@ async function doctorCommand(flags) {
     service: secret.provider,
     reference: secret.reference,
     envName: secret.envName,
+    alias: secret.alias,
     configured: secret.configured,
     state: secret.configured ? "configured" : "missing"
   }));
@@ -243,14 +248,15 @@ async function runCommand(args, flags, passthrough) {
   }
 
   const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
-  const secrets = await backend.resolveReferences(state.context.secrets);
+  const requestedReferences = await buildRunReferences(state, flags);
+  const secrets = await backend.resolveReferences(requestedReferences);
   const auditBase = {
     at: new Date().toISOString(),
     project: state.manifest.project.id,
     context: state.context.name,
     command: normalizeCommand(command),
-    injected: secrets.resolved.map(({ provider, reference, envName }) => ({ provider, reference, envName })),
-    missing: secrets.missing.map((secret) => ({ ...secret, envName: secret.envName ?? envNameForProvider(secret.provider) }))
+    injected: secrets.resolved.map(formatSecretForOutput),
+    missing: secrets.missing.map(formatSecretForOutput)
   };
 
   if (flags.dryRun) {
@@ -361,7 +367,8 @@ async function linkCommand(args, flags) {
 
   const loaded = await loadProjectState(process.cwd());
   const contextName = await resolveProjectContextName(loaded, flags.context);
-  setSecretReference(loaded.manifest, contextName, service, reference);
+  const attachment = flags.env ? { reference, envName: flags.env } : reference;
+  setSecretAttachment(loaded.manifest, contextName, service, attachment);
   await writeProjectState(loaded);
 
   if (flags.value !== undefined) {
@@ -372,7 +379,7 @@ async function linkCommand(args, flags) {
     }
   }
 
-  console.log(`Linked ${service} to ${reference} for ${loaded.manifest.project.id}/${contextName}`);
+  console.log(`Linked ${service} to ${reference}${flags.env ? ` as ${flags.env}` : ""} for ${loaded.manifest.project.id}/${contextName}`);
 }
 
 async function resolveAttachReference(service, requestedReference) {
@@ -400,7 +407,7 @@ async function unlinkCommand(args, flags) {
 
   const loaded = await loadProjectState(process.cwd());
   const contextName = await resolveProjectContextName(loaded, flags.context);
-  const reference = getContext(loaded.manifest, contextName).secrets[service];
+  const reference = referenceNameForAttachment(getContext(loaded.manifest, contextName).secrets[service]);
   removeSecretReference(loaded.manifest, contextName, service);
   await writeProjectState(loaded);
 
@@ -428,6 +435,8 @@ async function projectsCommand(args, flags) {
     services: services.map((service) => ({
       service: service.provider,
       reference: service.reference,
+      envName: service.envName,
+      alias: service.alias,
       configured: service.configured
     }))
   };
@@ -602,7 +611,7 @@ async function secretsCommand(args, flags) {
     if (!provider) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail secrets unset <provider>");
     const loaded = await loadProjectState(process.cwd());
     const contextName = await resolveProjectContextName(loaded, flags.context);
-    const reference = getContext(loaded.manifest, contextName).secrets[provider];
+    const reference = referenceNameForAttachment(getContext(loaded.manifest, contextName).secrets[provider]);
     removeSecretReference(loaded.manifest, contextName, provider);
     await writeProjectState(loaded);
     if (flags.deleteValue && reference) {
@@ -680,12 +689,33 @@ async function policyCommand(args, flags, passthrough = []) {
     return;
   }
 
+  if (subcommand === "allow-last") {
+    const audit = await readAuditLog(loaded, 100);
+    const last = [...audit].reverse().find((entry) => entry.decision === "denied" || entry.decision === "confirmation_required");
+    if (!last?.command) {
+      throw new KeyrailError("AUDIT_ENTRY_NOT_FOUND", "No denied or confirmation-required audit entry found for this project.");
+    }
+
+    const listName = last.decision === "confirmation_required" ? "requireConfirm" : "allow";
+    if (last.decision === "denied" && (loaded.manifest.policy.deny ?? []).some((pattern) => last.command.startsWith(pattern))) {
+      throw new KeyrailError("POLICY_DENIED", `Last denied command matches an explicit deny rule. Review with keyrail policy show --json before changing policy.`);
+    }
+    if (!loaded.manifest.policy[listName].includes(last.command)) loaded.manifest.policy[listName].push(last.command);
+    validateManifest(loaded.manifest);
+    await writeProjectState(loaded);
+
+    const payload = { command: last.command, list: listName, decision: last.decision };
+    if (flags.json) return printJson(payload);
+    console.log(`Added policy ${listName === "requireConfirm" ? "require-confirm" : "allow"}: ${last.command}`);
+    return;
+  }
+
   const listName = {
     "allow": "allow",
     "deny": "deny",
     "require-confirm": "requireConfirm"
   }[subcommand];
-  if (!listName) throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail policy show|allow|deny|require-confirm <command>");
+  if (!listName) throw new KeyrailError("UNKNOWN_COMMAND", "Use keyrail policy show|allow|allow-last|deny|require-confirm <command>");
 
   const command = commandFromPolicyArgs(args.slice(1), flags, passthrough);
   if (!command) throw new KeyrailError("INVALID_ARGUMENTS", `Use keyrail policy ${subcommand} <command> or keyrail policy ${subcommand} -- <command>`);
@@ -693,6 +723,187 @@ async function policyCommand(args, flags, passthrough = []) {
   validateManifest(loaded.manifest);
   await writeProjectState(loaded);
   console.log(`Added policy ${subcommand}: ${command}`);
+}
+
+async function syncCommand(args, flags) {
+  const target = args[0];
+  if (target !== "vercel-env") {
+    throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail sync vercel-env [--dry-run] [--json] [--target <environment>] [--project <vercel-project>] [--yes]");
+  }
+
+  const state = await getVerifiedState(flags.context);
+  const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
+  const vercelReference = state.context.secrets.vercel;
+  const targetReferences = Object.fromEntries(Object.entries(state.context.secrets ?? {}).filter(([provider]) => provider !== "vercel"));
+  const secrets = await backend.resolveReferences(targetReferences);
+  const vercelToken = await resolveVercelTokenForSync({ backend, state, vercelReference, dryRun: Boolean(flags.dryRun) });
+  const vercelProject = flags.project ?? state.manifest.project.id;
+  const envTarget = flags.target ?? defaultVercelEnvTarget(state.context.name);
+  const plan = buildVercelEnvSyncPlan(secrets, { vercelProject, envTarget, yes: Boolean(flags.yes) });
+  const subprocessOutput = [];
+  let synced = [];
+  let failed = [];
+
+  if (!flags.dryRun && secrets.missing.length > 0) {
+    await auditVercelEnvSync(state, flags, plan, secrets.missing, synced, failed);
+    throw await missingSecretsError(secrets.missing, state);
+  }
+
+  if (!flags.dryRun && plan.entries.length > 0) {
+    for (const entry of plan.entries) {
+      const result = await spawnWithInputRedacted(entry.command, `${entry.value}\n`, {
+        env: { ...process.env, VERCEL_TOKEN: vercelToken.value },
+        secretValues: [entry.value, vercelToken.value],
+        inheritOutput: !flags.json
+      });
+      subprocessOutput.push({ envName: entry.envName, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode });
+      if (result.exitCode === 0) synced.push(entry.output);
+      else {
+        failed.push({ ...entry.output, exitCode: result.exitCode });
+        break;
+      }
+    }
+  }
+
+  const payload = {
+    project: {
+      id: state.manifest.project.id,
+      name: state.manifest.project.name,
+      root: state.root
+    },
+    context: {
+      name: state.context.name,
+      risk: state.context.risk,
+      requireConfirmation: state.context.requireConfirmation
+    },
+    target: "vercel-env",
+    vercelProject,
+    envTarget,
+    auth: {
+      provider: "vercel",
+      envName: "VERCEL_TOKEN",
+      configured: Boolean(vercelToken.value)
+    },
+    synced,
+    failed,
+    wouldSync: plan.wouldSync,
+    missing: secrets.missing.map(formatSecretForOutput),
+    commands: plan.commands,
+    output: flags.json ? subprocessOutput : undefined,
+    dryRun: Boolean(flags.dryRun)
+  };
+
+  await auditVercelEnvSync(state, flags, plan, secrets.missing, synced, failed);
+
+  if (failed.length > 0) {
+    const failedNames = failed.map((item) => item.envName).join(", ");
+    const error = new KeyrailError("VERCEL_ENV_SYNC_FAILED", `vercel env add failed for ${failedNames}. Output was redacted.`);
+    if (flags.json) {
+      payload.error = { code: error.code, message: error.message };
+      printJson(payload);
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+
+  if (flags.json) return printJson(payload);
+  printVercelEnvSync(payload);
+}
+
+async function resolveVercelTokenForSync({ backend, state, vercelReference, dryRun }) {
+  if (!vercelReference) {
+    if (dryRun) return { value: null };
+    const remediation = await remediationForUnattachedSecret("vercel", state);
+    throw new KeyrailError(
+      "SECRET_NOT_FOUND",
+      `VERCEL_TOKEN is not configured for this project. ${remediation.message}`,
+      { nextSteps: remediation.nextSteps }
+    );
+  }
+
+  const tokenSecrets = await backend.resolveReferences({ vercel: vercelReference });
+  if (tokenSecrets.missing.length > 0) {
+    if (dryRun) return { value: null };
+    throw await missingSecretsError(tokenSecrets.missing, state);
+  }
+
+  const tokenEnvName = tokenSecrets.resolved[0]?.envName ?? "VERCEL_TOKEN";
+  return { value: tokenSecrets.env[tokenEnvName] ?? null };
+}
+
+function defaultVercelEnvTarget(contextName) {
+  const normalized = String(contextName ?? "").toLowerCase();
+  if (["production", "prod"].includes(normalized)) return "production";
+  if (["preview", "staging", "stage", "test", "testing"].includes(normalized)) return "preview";
+  if (["development", "dev", "local", "default"].includes(normalized)) return "development";
+  return normalized || "development";
+}
+
+function buildVercelEnvSyncPlan(secrets, { vercelProject, envTarget, yes }) {
+  const entries = secrets.resolved.map((secret) => {
+    const output = formatSecretForOutput(secret);
+    const command = ["vercel", "env", "add", output.envName, envTarget, "--project", vercelProject];
+    if (yes) command.push("--yes");
+    return {
+      ...output,
+      output,
+      value: secrets.env[output.envName],
+      command
+    };
+  });
+  const wouldSync = entries.map((entry) => entry.output);
+  return {
+    entries,
+    wouldSync,
+    commands: entries.map((entry) => entry.command.join(" "))
+  };
+}
+
+async function auditVercelEnvSync(state, flags, plan, missing, synced, failed) {
+  await appendAudit(state, {
+    at: new Date().toISOString(),
+    project: state.manifest.project.id,
+    context: state.context.name,
+    command: normalizeCommand(["keyrail", "sync", "vercel-env"]),
+    decision: flags.dryRun ? "dry_run" : (failed.length ? "failed" : (missing.length ? "missing_secrets" : "allowed")),
+    injected: plan.wouldSync,
+    synced: synced.map((secret) => secret.envName),
+    missing: missing.map(formatSecretForOutput),
+    missingEnvNames: missing.map((secret) => formatSecretForOutput(secret).envName),
+    failed: failed.map((secret) => secret.envName)
+  });
+}
+
+function printVercelEnvSync(payload) {
+  console.log(`Vercel env sync: ${payload.project.name} (${payload.project.id})`);
+  console.log(`Context: ${payload.context.name}`);
+  console.log(`Vercel project: ${payload.vercelProject}`);
+  console.log(`Target: ${payload.envTarget}`);
+  console.log(payload.dryRun ? "Mode: dry-run" : "Mode: sync");
+  if (!payload.auth.configured) console.log("Vercel auth: missing VERCEL_TOKEN");
+  if (payload.wouldSync.length) {
+    console.log("Would sync:");
+    for (const secret of payload.wouldSync) console.log(`- ${secret.envName}${secret.alias ? " (alias)" : ""} from ${secret.provider}:${secret.reference}`);
+  } else {
+    console.log("Would sync: none");
+  }
+  if (payload.missing.length) {
+    console.log("Missing:");
+    for (const secret of payload.missing) console.log(`- ${secret.envName}: ${remediationMessageForSecret(secret)}`);
+  }
+  if (payload.synced.length) {
+    console.log("Synced:");
+    for (const secret of payload.synced) console.log(`- ${secret.envName}`);
+  }
+  if (payload.failed.length) {
+    console.log("Failed:");
+    for (const secret of payload.failed) console.log(`- ${secret.envName}`);
+  }
+  if (payload.dryRun && payload.commands.length) {
+    console.log("Commands:");
+    for (const command of payload.commands) console.log(`- ${command}`);
+  }
 }
 
 async function auditCommand(args, flags) {
@@ -842,7 +1053,7 @@ function printSecretReferences(secrets) {
   }
   console.log("Secrets:");
   for (const secret of secrets) {
-    console.log(`- ${secret.provider}: ${secret.reference} (${secret.configured ? "configured" : "reference only"})`);
+    console.log(`- ${secret.provider}: ${secret.reference} -> ${secret.envName}${secret.alias ? " (alias)" : ""} (${secret.configured ? "configured" : "reference only"})`);
   }
 }
 
@@ -854,7 +1065,8 @@ function printServiceLinks(services) {
   console.log("Linked services:");
   for (const service of services) {
     const name = service.service ?? service.provider;
-    console.log(`- ${name}: ${service.reference} (${service.configured ? "configured" : "reference only"})`);
+    const envName = service.envName ? ` -> ${service.envName}${service.alias ? " (alias)" : ""}` : "";
+    console.log(`- ${name}: ${service.reference}${envName} (${service.configured ? "configured" : "reference only"})`);
   }
 }
 
@@ -865,6 +1077,7 @@ async function buildStatusPayload(state, flags = {}) {
     service: secret.provider,
     reference: secret.reference,
     envName: secret.envName,
+    alias: secret.alias,
     configured: secret.configured,
     state: secret.configured ? "configured" : "missing"
   }));
@@ -965,7 +1178,7 @@ function printDeploymentStatus(payload) {
   } else {
     console.log("Services:");
     for (const service of payload.services) {
-      console.log(`- ${service.service}: ${service.envName} (${service.configured ? "configured" : "missing"})`);
+      console.log(`- ${service.service}: ${service.envName}${service.alias ? " (alias)" : ""} (${service.configured ? "configured" : "missing"})`);
     }
   }
   if (payload.suggestions?.length) {
@@ -991,7 +1204,7 @@ function printDoctor(payload) {
   if (payload.services.length) {
     console.log("Linked services:");
     for (const service of payload.services) {
-      console.log(`- ${service.service}: ${service.envName} (${service.configured ? "configured" : "missing"})`);
+      console.log(`- ${service.service}: ${service.envName}${service.alias ? " (alias)" : ""} (${service.configured ? "configured" : "missing"})`);
     }
   } else {
     console.log("Linked services: none");
@@ -1023,7 +1236,7 @@ function printDryRun(payload) {
   } else {
     console.log("Would inject:");
     for (const secret of payload.injected) {
-      console.log(`- ${secret.envName} from ${secret.provider}:${secret.reference}`);
+      console.log(`- ${secret.envName}${secret.alias ? " (alias)" : ""} from ${secret.provider}:${secret.reference}`);
     }
   }
   if (!payload.missing.length) {
@@ -1047,8 +1260,48 @@ function nextRecommendedCommand(services, missingCount) {
   return "keyrail run --dry-run -- <command>";
 }
 
+async function buildRunReferences(state, flags) {
+  const references = { ...(state.context.secrets ?? {}) };
+  const requested = splitWithReferences(flags.with);
+  if (!requested.length) return references;
+
+  const profile = await readProfile();
+  for (const item of requested) {
+    const provider = item;
+    const attached = references[provider];
+    if (attached) {
+      references[provider] = attached;
+      continue;
+    }
+
+    const profileReference = profile.services[provider]?.reference;
+    references[provider] = profileReference ?? item;
+  }
+  return references;
+}
+
+function splitWithReferences(value) {
+  if (!value) return [];
+  return String(value).split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function formatSecretForOutput(secret) {
+  const envName = secret.envName ?? envNameForProvider(secret.provider);
+  return {
+    provider: secret.provider,
+    reference: secret.reference,
+    envName,
+    alias: Boolean(secret.alias)
+  };
+}
+
+function referenceNameForAttachment(entry) {
+  if (!entry) return null;
+  return typeof entry === "string" ? entry : entry.reference;
+}
+
 async function missingSecretsError(missing, state = null) {
-  const withEnvNames = missing.map((secret) => ({ ...secret, envName: secret.envName ?? envNameForProvider(secret.provider) }));
+  const withEnvNames = missing.map(formatSecretForOutput);
   const remediations = state
     ? await Promise.all(withEnvNames.map((secret) => remediationForMissingSecret(secret, state)))
     : withEnvNames.map((secret) => ({
@@ -1149,7 +1402,7 @@ async function remediationForPolicyDecision(decision, command, state, flags = {}
   const provider = providerForCommand(normalized);
   if (provider === "github") {
     const action = githubActionForCommand(normalized);
-    const name = state.context.secrets.github ?? "<name>";
+    const name = referenceNameForAttachment(state.context.secrets.github) ?? "<name>";
     return {
       message: `Route GitHub ${action} through a saved account or add a narrow policy rule with ${policyActionForCommand(normalized, state.manifest.policy)}.`,
       nextSteps: [
@@ -1389,6 +1642,36 @@ async function spawnRedacted(command, env, secretValues) {
   }
 }
 
+async function spawnWithInputRedacted(command, input, options = {}) {
+  const secretValues = options.secretValues ?? [];
+  const env = options.env ?? process.env;
+  const inheritOutput = options.inheritOutput ?? true;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command[0], command.slice(1), {
+      env,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      const redacted = redactSecrets(chunk.toString(), secretValues);
+      stdout += redacted;
+      if (inheritOutput) process.stdout.write(redacted);
+    });
+    child.stderr.on("data", (chunk) => {
+      const redacted = redactSecrets(chunk.toString(), secretValues);
+      stderr += redacted;
+      if (inheritOutput) process.stderr.write(redacted);
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+    child.stdin.end(input);
+  });
+}
+
 async function appendAudit(state, audit) {
   const dir = state.source === "user" ? path.join(getKeyrailConfigRoot(), "audit") : path.join(state.root, ".keyrail");
   await mkdir(dir, { recursive: true });
@@ -1443,6 +1726,7 @@ Usage:
   keyrail status [--json] [--context <name>]
   keyrail run [--dry-run] [--context <name>] [--yes] -- <command>
   keyrail deploy vercel [--prod] [--yes] [--dry-run]
+  keyrail sync vercel-env [--dry-run] [--json] [--target <environment>] [--project <vercel-project>] [--yes]
   keyrail ui [--port <port>] [--token <token>]
 
 Advanced:
@@ -1681,6 +1965,7 @@ export async function getStateForUi(root = process.cwd(), requestedContext = nul
       service: secret.provider,
       reference: secret.reference,
       envName: secret.envName,
+      alias: secret.alias,
       configured: secret.configured
     })),
     audit,

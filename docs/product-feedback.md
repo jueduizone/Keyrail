@@ -23,6 +23,8 @@ keyrail run --with vercel,cloudflare-stream-api-token,cloudflare-stream-account-
 
 The important product rule: Keyrail should inject all required values into the same child process instead of making users compose secrets through shell output.
 
+Progress: implemented `keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>`. It injects attached project secrets plus explicitly requested saved service accounts or references into one child process, includes injected/missing env names in dry-run and audit output, and preserves redaction of raw secret values.
+
 ### 2. Env Aliases
 
 Custom providers currently map to names such as:
@@ -45,6 +47,8 @@ keyrail attach cloudflare-stream-api-token soloship/cloudflare-stream-api-token 
 
 Routing should store both the service reference and the target env name. Status output should show the alias explicitly.
 
+Progress: implemented `keyrail attach <service> <name> --env <ENV_NAME>`. Project routing stores `{ reference, envName }` without raw values, while legacy `context.secrets` string references remain valid. Status, doctor, run dry-run, UI state, and audit output expose the alias metadata.
+
 ### 3. First-Class Vercel Env Sync
 
 Common workflow: Keyrail stores local/project secrets, but the deployment platform also needs env vars.
@@ -62,6 +66,8 @@ keyrail sync vercel-env CLOUDFLARE_STREAM_API_TOKEN --from cloudflare-stream-api
 ```
 
 This should avoid printing raw values, redact subprocess output, and ideally support dry-run/audit.
+
+Progress: implemented `keyrail sync vercel-env`. It resolves current project secrets, excludes the attached `vercel` token from the sync payload, writes values to `vercel env add` through stdin, supports `--dry-run`, `--json`, `--target`, `--project`, and `--yes`, redacts child-process output, and audits synced/missing/failed env names. Default Vercel target maps `local/dev/development` to `development`, `prod/production` to `production`, and `preview/staging` to `preview`.
 
 ## Policy UX
 
@@ -96,13 +102,13 @@ Implemented quick fix:
 keyrail policy allow -- "/bin/zsh -lc ..."
 ```
 
-Future improvement:
+Implemented follow-up:
 
 ```bash
 keyrail policy allow-last
 ```
 
-`allow-last` should read the last denied audit entry for the current project/context, show the exact normalized command, and require confirmation before adding it.
+`allow-last` reads the last denied or confirmation-required audit entry for the current project, adds the exact normalized command to `allow` or `requireConfirm`, refuses to override explicit deny rules, and supports `--json`.
 
 ## Run vs Use Mental Model
 
@@ -129,15 +135,15 @@ Refusing to save empty secret from stdin. Pass --allow-empty if this is intentio
 
 P0:
 
-- Inject multiple named secrets into one child process.
-- Support env aliases on project attachments.
-- Provide a safe Vercel env sync workflow.
+- Inject multiple named secrets into one child process. Implemented.
+- Support env aliases on project attachments. Implemented.
+- Provide a safe Vercel env sync workflow. Implemented.
 
 P1:
 
 - Improve policy presets for deployment and API workflows.
-- Add `policy allow-last`.
-- Clarify `run` vs `use` in CLI help and docs.
+- Add `policy allow-last`. Implemented.
+- Clarify `run` vs `use` in CLI help and docs. Implemented.
 
 P2:
 

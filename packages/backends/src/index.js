@@ -30,15 +30,16 @@ export class LocalFileSecretBackend {
   async listReferences(references) {
     const store = await this.readStore();
     const globalStore = await new GlobalSecretStore().readStore();
-    return Object.entries(references ?? {}).map(([provider, reference]) => {
-      const envName = envNameForProvider(provider);
+    return Object.entries(references ?? {}).map(([provider, entry]) => {
+      const secret = normalizeSecretReference(provider, entry);
       return {
-        provider,
-        reference,
-        envName,
-        configured: Object.prototype.hasOwnProperty.call(store, reference) ||
-          Object.prototype.hasOwnProperty.call(globalStore, reference) ||
-          Boolean(process.env[envName])
+        provider: secret.provider,
+        reference: secret.reference,
+        envName: secret.envName,
+        alias: secret.alias,
+        configured: Object.prototype.hasOwnProperty.call(store, secret.reference) ||
+          Object.prototype.hasOwnProperty.call(globalStore, secret.reference) ||
+          Boolean(process.env[secret.envName])
       };
     });
   }
@@ -50,16 +51,16 @@ export class LocalFileSecretBackend {
     const resolved = [];
     const missing = [];
 
-    for (const [provider, reference] of Object.entries(references ?? {})) {
-      const value = store[reference] ?? globalStore[reference] ?? process.env[envNameForProvider(provider)] ?? null;
+    for (const [provider, entry] of Object.entries(references ?? {})) {
+      const secret = normalizeSecretReference(provider, entry);
+      const value = store[secret.reference] ?? globalStore[secret.reference] ?? process.env[secret.envName] ?? null;
       if (value === null || value === undefined) {
-        missing.push({ provider, reference });
+        missing.push(secret);
         continue;
       }
 
-      const envName = envNameForProvider(provider);
-      env[envName] = value;
-      resolved.push({ provider, reference, envName });
+      env[secret.envName] = value;
+      resolved.push(secret);
     }
 
     return { env, resolved, missing };
@@ -91,12 +92,16 @@ export class LocalFileSecretBackend {
 
 export class EnvSecretBackend {
   async listReferences(references) {
-    return Object.entries(references ?? {}).map(([provider, reference]) => ({
-      provider,
-      reference,
-      envName: envNameForProvider(provider),
-      configured: Boolean(process.env[envNameForProvider(provider)])
-    }));
+    return Object.entries(references ?? {}).map(([provider, entry]) => {
+      const secret = normalizeSecretReference(provider, entry);
+      return {
+        provider: secret.provider,
+        reference: secret.reference,
+        envName: secret.envName,
+        alias: secret.alias,
+        configured: Boolean(process.env[secret.envName])
+      };
+    });
   }
 
   async resolveReferences(references) {
@@ -104,16 +109,16 @@ export class EnvSecretBackend {
     const resolved = [];
     const missing = [];
 
-    for (const [provider, reference] of Object.entries(references ?? {})) {
-      const envName = envNameForProvider(provider);
-      const value = process.env[envName] ?? null;
+    for (const [provider, entry] of Object.entries(references ?? {})) {
+      const secret = normalizeSecretReference(provider, entry);
+      const value = process.env[secret.envName] ?? null;
       if (!value) {
-        missing.push({ provider, reference });
+        missing.push(secret);
         continue;
       }
 
-      env[envName] = value;
-      resolved.push({ provider, reference, envName });
+      env[secret.envName] = value;
+      resolved.push(secret);
     }
 
     return { env, resolved, missing };
@@ -165,6 +170,17 @@ export function envNameForProvider(provider) {
   };
 
   return known[provider] ?? `KEYRAIL_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+}
+
+export function normalizeSecretReference(provider, entry) {
+  const reference = typeof entry === "string" ? entry : entry?.reference;
+  const envName = typeof entry === "object" && entry?.envName ? entry.envName : envNameForProvider(provider);
+  return {
+    provider,
+    reference,
+    envName,
+    alias: envName !== envNameForProvider(provider)
+  };
 }
 
 export function redactSecrets(output, values) {

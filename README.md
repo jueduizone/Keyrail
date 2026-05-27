@@ -89,9 +89,12 @@ Attach account names to the current project:
 keyrail attach github personal
 keyrail attach vercel acme-vercel
 keyrail attach supabase acme-supabase
+keyrail attach cloudflare-stream-api-token acme-cloudflare --env CLOUDFLARE_STREAM_API_TOKEN
 ```
 
 If only one saved account exists for a service, `keyrail attach <service>` uses it automatically. If more than one exists, Keyrail prints the default account and candidates so the reference is explicit.
+
+`--env <ENV_NAME>` stores a project/context alias for the injected environment variable name. Keyrail stores only the service reference and target env name in project routing; raw secret values stay in the configured secret backend.
 
 You can also attach and store a local value in one step:
 
@@ -112,8 +115,12 @@ keyrail run --dry-run -- vercel deploy
 keyrail run -- gh issue list
 keyrail run -- vercel deploy
 keyrail run -- supabase db push
+keyrail run --with stripe,cloudflare-stream-api-token -- npm run deploy
 keyrail deploy vercel --prod --yes
+keyrail sync vercel-env --dry-run --target preview --project acme-web
 ```
+
+`keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>` injects the active project's attached services plus extra named service accounts or references into one child process. Dry-run JSON and human output list injected and missing env var names, including aliases, without printing raw secret values.
 
 Open the local UI:
 
@@ -165,6 +172,7 @@ Example:
       "service": "vercel",
       "reference": "acme-vercel-token",
       "envName": "VERCEL_TOKEN",
+      "alias": false,
       "configured": true,
       "state": "configured"
     }
@@ -192,6 +200,8 @@ Example:
 ```
 
 Use `keyrail run --dry-run -- <command>` before deploys to see policy results, injected env var names, and missing references without executing the child command. `keyrail deploy vercel [--prod] [--yes] [--dry-run]` is an alias for the Vercel deploy workflow and requires `VERCEL_TOKEN` to be attached and configured. `--yes` confirms Keyrail policy and is forwarded to Vercel.
+
+`keyrail sync vercel-env` copies resolved project secrets (except the attached `vercel` token used only for authentication) to Vercel using `vercel env add <ENV_NAME> <target> --project <project>`. When `--target` is omitted, Keyrail maps `local/dev/development` to `development`, `prod/production` to `production`, and `preview/staging` to `preview`. Use `--dry-run` to inspect env names without writing, `--json` for machine-readable output, `--target <production|preview|development|...>` to choose the Vercel environment, `--project <name>` to override the default project id, and `--yes` to forward confirmation to Vercel. Keyrail redacts secret values from Vercel subprocess output and audits synced, missing, and failed env names without storing raw values.
 
 ## Local UI
 

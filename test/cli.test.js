@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { getStateForUi, renderUiHtml } from "../packages/cli/src/cli.js";
 
@@ -166,6 +167,75 @@ test("attach status and detach provide the human-friendly service routing workfl
   const detach = run(["detach", "vercel"], cwd);
   assert.equal(detach.status, 0, detach.stderr);
   assert.deepEqual(JSON.parse(run(["status", "--json"], cwd).stdout).services, []);
+});
+
+test("attach supports env aliases and reports them in status doctor and dry-run", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-env-alias-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "cloudflare-stream-api-token", "demo-cloudflare", "--env", "CLOUDFLARE_STREAM_API_TOKEN"], cwd).status, 0);
+  assert.equal(run(["policy", "allow", "node -e"], cwd).status, 0);
+
+  const manifest = await readFile(path.join(cwd, ".agent-context.yaml"), "utf8");
+  assert.match(manifest, /cloudflare-stream-api-token:/);
+  assert.match(manifest, /reference: demo-cloudflare/);
+  assert.match(manifest, /envName: CLOUDFLARE_STREAM_API_TOKEN/);
+  assert.doesNotMatch(manifest, /DUMMY_CLOUDFLARE_TOKEN/);
+
+  const status = run(["status", "--json"], cwd);
+  assert.equal(status.status, 0, status.stderr);
+  const statusPayload = JSON.parse(status.stdout);
+  assert.equal(statusPayload.services[0].envName, "CLOUDFLARE_STREAM_API_TOKEN");
+  assert.equal(statusPayload.services[0].alias, true);
+  assert.equal(statusPayload.context.secrets["cloudflare-stream-api-token"].reference, "demo-cloudflare");
+
+  const humanStatus = run(["status"], cwd);
+  assert.equal(humanStatus.status, 0, humanStatus.stderr);
+  assert.match(humanStatus.stdout, /CLOUDFLARE_STREAM_API_TOKEN \(alias\)/);
+
+  const doctor = run(["doctor", "--json"], cwd);
+  assert.equal(doctor.status, 0, doctor.stderr);
+  assert.equal(JSON.parse(doctor.stdout).services[0].envName, "CLOUDFLARE_STREAM_API_TOKEN");
+
+  const dryRun = run(["run", "--dry-run", "--json", "--", "node", "-e", "console.log('no execute')"], cwd);
+  assert.equal(dryRun.status, 0, dryRun.stderr);
+  const dryRunPayload = JSON.parse(dryRun.stdout);
+  assert.equal(dryRunPayload.missing[0].envName, "CLOUDFLARE_STREAM_API_TOKEN");
+  assert.equal(dryRunPayload.missing[0].alias, true);
+});
+
+test("run --with injects attached project secrets plus explicit service accounts", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-run-with-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-run-with-home-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(run(["policy", "allow", "node -e"], cwd, { KEYRAIL_HOME: keyrailHome }).status, 0);
+  assert.equal(run(["attach", "openai", "demo-openai", "--value", "DUMMY_RUN_WITH_OPENAI"], cwd, { KEYRAIL_HOME: keyrailHome }).status, 0);
+  assert.equal(run(["auth", "add", "stripe", "billing", "--value", "DUMMY_RUN_WITH_STRIPE"], cwd, { KEYRAIL_HOME: keyrailHome }).status, 0);
+
+  const dryRun = run(["run", "--with", "stripe,missing-ref", "--dry-run", "--json", "--", "node", "-e", "console.log('no execute')"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  });
+  assert.equal(dryRun.status, 0, dryRun.stderr);
+  const payload = JSON.parse(dryRun.stdout);
+  assert.deepEqual(payload.injected.map((secret) => secret.envName).sort(), ["OPENAI_API_KEY", "STRIPE_API_KEY"]);
+  assert.equal(payload.missing[0].reference, "missing-ref");
+  assert.equal(payload.missing[0].envName, "KEYRAIL_MISSING_REF");
+  assert.doesNotMatch(dryRun.stdout, /DUMMY_RUN_WITH_OPENAI|DUMMY_RUN_WITH_STRIPE/);
+
+  const result = run([
+    "run",
+    "--with",
+    "stripe",
+    "--",
+    "node",
+    "-e",
+    "console.log([process.env.OPENAI_API_KEY, process.env.STRIPE_API_KEY].join('|'))"
+  ], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[REDACTED\]\|\[REDACTED\]/);
+  assert.doesNotMatch(result.stdout, /DUMMY_RUN_WITH_OPENAI|DUMMY_RUN_WITH_STRIPE/);
+
+  const audit = JSON.parse(run(["audit", "list", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout).at(-1);
+  assert.deepEqual(audit.injected.map((secret) => secret.envName).sort(), ["OPENAI_API_KEY", "STRIPE_API_KEY"]);
 });
 
 test("deploy vercel alias dry-run resolves to vercel deploy with policy and VERCEL_TOKEN", async () => {
@@ -613,6 +683,86 @@ test("agent skill documents current state and private repo bootstrap", async () 
   assert.match(skill, /Never read, print, or copy raw secret values/);
 });
 
+test("sync vercel-env dry-run plans resolved project secrets without exposing values", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-sync-vercel-dry-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "vercel", "demo-vercel", "--value", "DUMMY_SYNC_VERCEL_TOKEN"], cwd).status, 0);
+  assert.equal(run(["attach", "openai", "demo-openai", "--value", "DUMMY_SYNC_OPENAI_TOKEN"], cwd).status, 0);
+  assert.equal(run(["attach", "stripe", "demo-stripe"], cwd).status, 0);
+
+  const result = run(["sync", "vercel-env", "--dry-run", "--json", "--target", "preview", "--project", "web-app", "--yes"], cwd);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /DUMMY_SYNC_OPENAI_TOKEN|DUMMY_SYNC_VERCEL_TOKEN/);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.envTarget, "preview");
+  assert.equal(payload.vercelProject, "web-app");
+  assert.deepEqual(payload.wouldSync.map((secret) => secret.envName), ["OPENAI_API_KEY"]);
+  assert.deepEqual(payload.missing.map((secret) => secret.envName), ["STRIPE_API_KEY"]);
+  assert.equal(payload.auth.configured, true);
+  assert.equal(payload.commands[0], "vercel env add OPENAI_API_KEY preview --project web-app --yes");
+  assert.deepEqual(payload.synced, []);
+});
+
+test("sync vercel-env runs vercel env add with redacted output and audit", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-sync-vercel-real-"));
+  const binDir = await mkdtemp(path.join(os.tmpdir(), "keyrail-vercel-bin-"));
+  const logPath = path.join(cwd, "vercel-call.jsonl");
+  const fakeVercel = path.join(binDir, "vercel");
+  await writeFile(fakeVercel, `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nconst chunks=[];\nfor await (const chunk of process.stdin) chunks.push(chunk);\nconst value=Buffer.concat(chunks).toString('utf8').trim();\nappendFileSync(process.env.VERCEL_LOG, JSON.stringify({ args: process.argv.slice(2), value, token: process.env.VERCEL_TOKEN }) + '\\n');\nconsole.log('added ' + value + ' using ' + process.env.VERCEL_TOKEN);\n`, { mode: 0o700 });
+  await chmod(fakeVercel, 0o700);
+
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "vercel", "demo-vercel", "--value", "DUMMY_REAL_VERCEL_TOKEN"], cwd).status, 0);
+  assert.equal(run(["attach", "openai", "demo-openai", "--value", "DUMMY_REAL_OPENAI_TOKEN"], cwd).status, 0);
+
+  const result = run(["sync", "vercel-env", "--target", "production", "--project", "demo-web", "--yes"], cwd, {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+    VERCEL_LOG: logPath
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[REDACTED\]/);
+  assert.doesNotMatch(result.stdout, /DUMMY_REAL_OPENAI_TOKEN|DUMMY_REAL_VERCEL_TOKEN/);
+  assert.match(result.stdout, /Synced:/);
+  assert.match(result.stdout, /OPENAI_API_KEY/);
+
+  const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls[0].args, ["env", "add", "OPENAI_API_KEY", "production", "--project", "demo-web", "--yes"]);
+  assert.equal(calls[0].value, "DUMMY_REAL_OPENAI_TOKEN");
+  assert.equal(calls[0].token, "DUMMY_REAL_VERCEL_TOKEN");
+
+  const audit = JSON.parse(run(["audit", "list", "--json"], cwd).stdout).at(-1);
+  assert.equal(audit.decision, "allowed");
+  assert.deepEqual(audit.synced, ["OPENAI_API_KEY"]);
+  assert.deepEqual(audit.missingEnvNames, []);
+});
+
+test("sync vercel-env defaults local context to Vercel development target", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-sync-vercel-default-target-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "vercel", "demo-vercel", "--value", "DUMMY_DEFAULT_TARGET_VERCEL_TOKEN"], cwd).status, 0);
+  assert.equal(run(["attach", "openai", "demo-openai", "--value", "DUMMY_DEFAULT_TARGET_OPENAI_TOKEN"], cwd).status, 0);
+
+  const result = run(["sync", "vercel-env", "--dry-run", "--json"], cwd);
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.context.name, "local");
+  assert.equal(payload.envTarget, "development");
+  assert.equal(payload.commands[0], "vercel env add OPENAI_API_KEY development --project demo");
+  assert.doesNotMatch(result.stdout, /DUMMY_DEFAULT_TARGET_OPENAI_TOKEN|DUMMY_DEFAULT_TARGET_VERCEL_TOKEN/);
+});
+
+test("sync vercel-env uses existing Vercel token remediation when token is missing", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-sync-vercel-missing-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "openai", "demo-openai", "--value", "DUMMY_MISSING_TOKEN_OPENAI"], cwd).status, 0);
+
+  const result = run(["sync", "vercel-env"], cwd);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /VERCEL_TOKEN is not configured/);
+  assert.match(result.stderr, /keyrail auth add vercel <name> --value-stdin/);
+  assert.doesNotMatch(result.stderr, /DUMMY_MISSING_TOKEN_OPENAI/);
+});
+
 test("policy and audit commands expose configured rules and run decisions", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-audit-"));
   run(["init", "--id", "demo", "--repo", "local"], cwd);
@@ -642,11 +792,45 @@ test("policy allow accepts a full command after --", async () => {
   assert.ok(policy.allow.includes("/bin/zsh -lc printf '%s' \"$TOKEN\" | npx vercel env add FOO production"));
 });
 
+test("policy allow-last promotes the last denied audit command", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-policy-allow-last-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const denied = run(["run", "--", "node", "-e", "console.log('blocked')"], cwd);
+  assert.notEqual(denied.status, 0);
+
+  const allowLast = run(["policy", "allow-last", "--json"], cwd);
+  assert.equal(allowLast.status, 0, allowLast.stderr);
+  const payload = JSON.parse(allowLast.stdout);
+  assert.equal(payload.command, "node -e console.log('blocked')");
+  assert.equal(payload.list, "allow");
+
+  const policy = JSON.parse(run(["policy", "show", "--json"], cwd).stdout);
+  assert.ok(policy.allow.includes("node -e console.log('blocked')"));
+});
+
+test("policy allow-last refuses to override explicit deny rules", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-policy-allow-last-deny-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["policy", "deny", "node -e"], cwd).status, 0);
+
+  const denied = run(["run", "--", "node", "-e", "console.log('blocked')"], cwd);
+  assert.notEqual(denied.status, 0);
+
+  const allowLast = run(["policy", "allow-last"], cwd);
+  assert.notEqual(allowLast.status, 0);
+  assert.match(allowLast.stderr, /explicit deny rule/);
+
+  const policy = JSON.parse(run(["policy", "show", "--json"], cwd).stdout);
+  assert.ok(!policy.allow.includes("node -e console.log('blocked')"));
+});
+
 function run(args, cwd, env = {}, input = undefined) {
+  const homeKey = createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16);
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: { ...process.env, KEYRAIL_HOME: path.join(os.tmpdir(), `keyrail-test-home-${homeKey}`), ...env },
     input
   });
 }

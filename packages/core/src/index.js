@@ -11,6 +11,7 @@ export {
   removeContext,
   removeSecretReference,
   resolveActiveContextName,
+  setSecretAttachment,
   setSecretReference,
   upsertContext,
   validateManifest,

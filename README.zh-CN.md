@@ -91,9 +91,12 @@ keyrail auth add vercel acme-vercel --value-stdin
 keyrail attach github personal
 keyrail attach vercel acme-vercel
 keyrail attach supabase acme-supabase
+keyrail attach cloudflare-stream-api-token acme-cloudflare --env CLOUDFLARE_STREAM_API_TOKEN
 ```
 
 如果某个 service 只保存了一个账号，`keyrail attach <service>` 会自动使用它；如果保存了多个账号，Keyrail 会直接提示默认账号和候选列表，要求显式写出 reference，避免绑错。
+
+`--env <ENV_NAME>` 会保存当前项目/context 的环境变量别名。Keyrail 只在项目路由里保存 service reference 和目标环境变量名，明文 secret 仍留在配置的 secret backend。
 
 也可以绑定并同时保存本地值：
 
@@ -115,7 +118,11 @@ keyrail run --dry-run -- vercel deploy
 keyrail run -- vercel deploy
 keyrail deploy vercel --prod --yes
 keyrail run -- supabase db push
+keyrail run --with stripe,cloudflare-stream-api-token -- npm run deploy
+keyrail sync vercel-env --dry-run --target preview --project acme-web
 ```
+
+`keyrail run --with <service-or-ref>[,<service-or-ref>...] -- <command>` 会在同一个子进程里注入当前项目已绑定的 secrets 和额外指定的用户级账号/引用。dry-run 的 JSON 和文本输出只列出会注入或缺失的环境变量名，包括 alias，不打印明文 secret。
 
 打开 UI：
 
@@ -167,6 +174,7 @@ keyrail status --json
       "service": "vercel",
       "reference": "acme-vercel-token",
       "envName": "VERCEL_TOKEN",
+      "alias": false,
       "configured": true,
       "state": "configured"
     }
@@ -194,6 +202,8 @@ keyrail status --json
 ```
 
 部署前建议先运行 `keyrail run --dry-run -- <command>`，它只显示策略判断、会注入的环境变量名和缺失引用，不执行子命令，也不会打印 secret 值。`keyrail deploy vercel [--prod] [--yes] [--dry-run]` 是 Vercel 部署快捷入口；`--yes` 会同时确认 Keyrail 策略并传给 Vercel。
+
+`keyrail sync vercel-env` 会把当前项目已解析的 secrets（不包括只用于认证的 `vercel` token）通过 `vercel env add <ENV_NAME> <target> --project <project>` 同步到 Vercel。默认 target 会把 `local/dev/development` 映射为 `development`，`prod/production` 映射为 `production`，`preview/staging` 映射为 `preview`；也可以用 `--target` 覆盖。使用 `--dry-run` 可只查看环境变量名不写入，`--json` 可给 Agent/CI 消费，`--project` 可覆盖 Vercel project，`--yes` 会传给 Vercel。Keyrail 会 redaction 子进程输出，并在 audit 里记录 synced/missing/failed env names，不保存明文值。
 
 ## 本地 UI
 

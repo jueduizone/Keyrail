@@ -1,4 +1,5 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { parseYaml, stringifyYaml } from "./yaml.js";
 
@@ -6,15 +7,18 @@ export const MANIFEST_FILE = ".agent-context.yaml";
 export const LOCK_FILE = ".ctx/lock.yaml";
 
 export async function findProjectRoot(startDir = process.cwd()) {
-  let current = path.resolve(startDir);
+  const original = path.resolve(startDir);
+  let current = original;
+  const stopAt = nearestEphemeralBoundary(original);
 
   while (true) {
+    if (current === stopAt && current !== original) return original;
     if (await exists(path.join(current, MANIFEST_FILE))) return current;
     if (await exists(path.join(current, ".git"))) return current;
     if (await exists(path.join(current, "package.json"))) return current;
 
     const parent = path.dirname(current);
-    if (parent === current) return path.resolve(startDir);
+    if (parent === current) return original;
     current = parent;
   }
 }
@@ -118,6 +122,15 @@ export function validateManifest(manifest) {
     if (!context.secrets || typeof context.secrets !== "object" || Array.isArray(context.secrets)) {
       throw new KeyrailError("INVALID_MANIFEST", `contexts.${name}.secrets must be an object`);
     }
+    for (const [provider, entry] of Object.entries(context.secrets)) {
+      requiredString(provider, `contexts.${name}.secrets provider`);
+      if (typeof entry === "string") continue;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new KeyrailError("INVALID_MANIFEST", `contexts.${name}.secrets.${provider} must be a reference string or object`);
+      }
+      requiredString(entry.reference, `contexts.${name}.secrets.${provider}.reference`);
+      if (entry.envName !== undefined) requiredString(entry.envName, `contexts.${name}.secrets.${provider}.envName`);
+    }
   }
 
   for (const field of ["allow", "requireConfirm", "deny"]) {
@@ -198,6 +211,17 @@ export function setSecretReference(manifest, contextName, provider, reference) {
   return manifest;
 }
 
+export function setSecretAttachment(manifest, contextName, provider, attachment) {
+  const context = getContext(manifest, contextName);
+  requiredString(provider, "provider");
+  const reference = typeof attachment === "string" ? attachment : attachment?.reference;
+  requiredString(reference, "reference");
+  if (typeof attachment === "object" && attachment?.envName) requiredString(attachment.envName, "envName");
+  context.secrets[provider] = attachment;
+  validateManifest(manifest);
+  return manifest;
+}
+
 export function removeSecretReference(manifest, contextName, provider) {
   const context = getContext(manifest, contextName);
   if (!context.secrets[provider]) {
@@ -224,6 +248,13 @@ async function exists(target) {
   } catch {
     return false;
   }
+}
+
+function nearestEphemeralBoundary(target) {
+  const resolved = path.resolve(target);
+  const tmp = path.resolve(os.tmpdir());
+  if (resolved === tmp || resolved.startsWith(`${tmp}${path.sep}`)) return tmp;
+  return null;
 }
 
 function requiredString(value, field) {
