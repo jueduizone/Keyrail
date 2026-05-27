@@ -263,7 +263,12 @@ keyrail policy allow -- "/bin/zsh -lc 'printf ... | npx vercel env add ...'"
 ```bash
 npm install
 npm run check
-npm_config_cache=/private/tmp/keyrail-npm-cache npm run pack:dry-run
+npm run smoke
+npm run release:check
 ```
+
+`npm run smoke` 会创建临时项目和临时 Keyrail home，用本地 CLI 与 dummy 值覆盖 auth、attach、`status --json`、`doctor --json`、dry-run 注入/缺失服务提示、Vercel 修复建议、GitHub policy 拒绝修复建议、Supabase 缺值修复建议。它不需要外部网络或真实 secret。
+
+`npm run release:check` 会运行 `check`、`smoke`、`npm pack --dry-run`，检查真实临时包里的 `bin`、`src`、`package.json`、`README.md`，拒绝明显的 secret/本地状态文件，并验证临时安装后的 `keyrail` bin 可以打印 help。它不会 bump version、publish，也不需要生产凭证。
 
 当前版本：`0.1.0`。

@@ -274,7 +274,12 @@ Use `keyrail doctor` for a human checklist or `keyrail doctor --json` for struct
 ```bash
 npm install
 npm run check
-npm_config_cache=/private/tmp/keyrail-npm-cache npm run pack:dry-run
+npm run smoke
+npm run release:check
 ```
+
+`npm run smoke` creates temporary project and Keyrail home directories, uses the local CLI with dummy values, and exercises auth, attach, `status --json`, `doctor --json`, dry-run injection/missing-service reporting, Vercel remediation, GitHub policy denial remediation, and Supabase missing-value remediation. It does not require external network access or real secrets.
+
+`npm run release:check` runs `check`, `smoke`, `npm pack --dry-run`, inspects a real temporary CLI package tarball for the expected `bin`, `src`, `package.json`, and `README.md` files, rejects obvious secret/local-state files, and verifies the unpacked `keyrail` bin can print help. It does not bump versions, publish, or require production credentials.
 
 Current version: `0.1.0`.

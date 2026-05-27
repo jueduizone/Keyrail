@@ -13,6 +13,8 @@
   "scripts": {
     "test": "node --test",
     "check": "node --check packages/cli/src/cli.js && node --test",
+    "smoke": "node scripts/smoke.mjs",
+    "release:check": "node scripts/release-check.mjs",
     "pack:dry-run": "npm pack --dry-run --workspace @keyrail/cli",
     "keyrail": "node packages/cli/bin/keyrail.js"
   },
