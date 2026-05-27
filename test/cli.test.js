@@ -183,18 +183,19 @@ test("deploy vercel alias dry-run resolves to vercel deploy with policy and VERC
 
 test("deploy vercel reports exact remediation when VERCEL_TOKEN is missing", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-deploy-missing-"));
-  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-deploy-missing-home-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd, { KEYRAIL_HOME: keyrailHome });
 
-  const unattached = run(["deploy", "vercel", "--dry-run"], cwd);
+  const unattached = run(["deploy", "vercel", "--dry-run"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.notEqual(unattached.status, 0);
   assert.match(unattached.stderr, /VERCEL_TOKEN is not configured/);
-  assert.match(unattached.stderr, /keyrail attach vercel <reference> --value/);
+  assert.match(unattached.stderr, /keyrail attach vercel <reference> --value-stdin/);
 
-  assert.equal(run(["attach", "vercel", "demo-vercel"], cwd).status, 0);
-  const missingValue = run(["deploy", "vercel", "--dry-run"], cwd);
+  assert.equal(run(["attach", "vercel", "demo-vercel"], cwd, { KEYRAIL_HOME: keyrailHome }).status, 0);
+  const missingValue = run(["deploy", "vercel", "--dry-run"], cwd, { KEYRAIL_HOME: keyrailHome });
   assert.notEqual(missingValue.status, 0);
   assert.match(missingValue.stderr, /VERCEL_TOKEN is not configured/);
-  assert.match(missingValue.stderr, /keyrail attach vercel demo-vercel --value/);
+  assert.match(missingValue.stderr, /keyrail attach vercel demo-vercel --value-stdin/);
 });
 
 test("attach and run work without project init or project files", async () => {
@@ -392,6 +393,75 @@ test("status suggests locally available unattached accounts relevant to the repo
   assert.match(humanStatus.stdout, /keyrail attach github jueduizone/);
   assert.match(humanStatus.stdout, /keyrail attach vercel preview/);
   assert.doesNotMatch(humanStatus.stdout, /stripe/);
+});
+
+test("doctor reports diagnostics, next steps, and human guidance", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-doctor-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-doctor-home-"));
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "doctor-demo" }));
+
+  assert.equal(run(["auth", "add", "github", "jueduizone", "--value", "DUMMY_DOCTOR_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+  assert.equal(run(["auth", "add", "vercel", "preview", "--value", "DUMMY_DOCTOR_VERCEL_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+
+  const json = run(["doctor", "--json"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(json.status, 0, json.stderr);
+  const payload = JSON.parse(json.stdout);
+  assert.equal(payload.ok, true);
+  assert.ok(Array.isArray(payload.nextSteps));
+  assert.deepEqual(payload.suggestions.map((suggestion) => suggestion.command), [
+    "keyrail attach github jueduizone",
+    "keyrail attach vercel preview"
+  ]);
+  assert.ok(payload.nextSteps.some((step) => step.command === "keyrail attach github jueduizone"));
+  assert.ok(payload.nextSteps.some((step) => step.command === "keyrail run --dry-run -- <command>"));
+  assert.ok(payload.policyGuidance.some((item) => item.command === "vercel deploy" && item.nextCommand.includes("keyrail run --dry-run")));
+
+  const human = run(["doctor"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Keyrail doctor: Doctor Demo/);
+  assert.match(human.stdout, /Suggested attachments:/);
+  assert.match(human.stdout, /keyrail attach vercel preview/);
+  assert.match(human.stdout, /Command policy guidance:/);
+  assert.match(human.stdout, /Next steps:/);
+});
+
+test("policy denial remediation includes concrete next commands", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-policy-remediation-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const denied = run(["run", "--", "node", "-e", "console.log('blocked')"], cwd);
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /POLICY_DENIED/);
+  assert.match(denied.stderr, /keyrail doctor/);
+  assert.match(denied.stderr, /keyrail policy allow -- node -e/);
+  assert.match(denied.stderr, /"nextSteps"/);
+
+  assert.equal(run(["attach", "vercel", "demo-vercel", "--value", "DUMMY_POLICY_VERCEL_TOKEN"], cwd).status, 0);
+  const prod = run(["deploy", "vercel", "--prod", "--dry-run"], cwd);
+  assert.notEqual(prod.status, 0);
+  assert.match(prod.stderr, /CONFIRMATION_REQUIRED/);
+  assert.match(prod.stderr, /keyrail deploy vercel --prod --yes --dry-run/);
+});
+
+test("missing-secret remediation prefers suggested attach commands", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-missing-suggested-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-missing-suggested-home-"));
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "missing-suggested-demo" }));
+
+  assert.equal(run(["auth", "add", "vercel", "preview", "--value", "DUMMY_PROFILE_VERCEL_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+
+  const unattached = run(["deploy", "vercel", "--dry-run"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.notEqual(unattached.status, 0);
+  assert.match(unattached.stderr, /VERCEL_TOKEN is not configured/);
+  assert.match(unattached.stderr, /keyrail attach vercel preview --value-stdin/);
+  assert.doesNotMatch(unattached.stderr, /--value \.\.\./);
+  assert.match(unattached.stderr, /"nextSteps"/);
 });
 
 test("profile set accepts secret values from stdin", async () => {

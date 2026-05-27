@@ -250,6 +250,8 @@ keyrail handoff --json
 keyrail doctor
 ```
 
+`keyrail doctor --json` is the troubleshooting interface for agents and scripts. It keeps the existing status fields compatible and adds `checks`, linked-service readiness, local account attachment suggestions, command-policy guidance, and a structured `nextSteps` array. The human output prints the same remediation commands without exposing raw secret values.
+
 For complex commands, prefer passing the full policy pattern after `--` so the shell does not treat pipes or redirects as part of the outer command:
 
 ```bash

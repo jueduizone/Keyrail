@@ -148,32 +148,67 @@ async function identifyCommand(flags) {
 }
 
 async function doctorCommand(flags) {
+  const loaded = await loadProjectState(process.cwd());
+  const contextName = await resolveProjectContextName(loaded, flags.context);
+  const context = getContext(loaded.manifest, contextName);
+  const identity = await identifyProject(loaded.root, loaded.manifest);
+  const verification = verifyProjectIdentity(identity, loaded.manifest);
+  const state = { ...loaded, context, identity, verification };
+  const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
+  const secrets = await secretBackend.listReferences(state.context.secrets);
+  const services = secrets.map((secret) => ({
+    service: secret.provider,
+    reference: secret.reference,
+    envName: secret.envName,
+    configured: secret.configured,
+    state: secret.configured ? "configured" : "missing"
+  }));
+  const missing = secrets.filter((secret) => !secret.configured);
+  const suggestions = await buildStatusSuggestions(state, services);
+  const nextSteps = buildDoctorNextSteps({ state, verification, services, missing, suggestions });
+  const policyGuidance = buildPolicyGuidance(state);
   const checks = [];
-  let ok = true;
 
-  try {
-    const state = await getVerifiedState(flags.context);
-    checks.push(pass("project", state.source === "user" ? "User-level project routing is valid" : `${MANIFEST_FILE} is valid`));
-    checks.push(pass("identity", state.verification.reason));
+  checks.push(pass("project", state.source === "user" ? "User-level project routing is valid" : `${MANIFEST_FILE} is valid`));
+  checks.push(verification.verified ? pass("identity", verification.reason) : fail("identity", verification.reason));
 
-    const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
-    const secrets = await secretBackend.listReferences(state.context.secrets);
-    const missing = secrets.filter((secret) => !secret.configured);
-    if (missing.length > 0) {
-      checks.push(warn("secrets", `${missing.length} secret reference(s) are not in local store; environment variables may still satisfy runtime`));
-    } else {
-      checks.push(pass("secrets", "All context secret references are configured locally"));
-    }
-  } catch (error) {
-    ok = false;
-    checks.push(fail(error.code ?? "error", error.message));
+  const remoteCredential = embeddedCredentialRemote(identity.gitRemote);
+  if (remoteCredential) {
+    checks.push(warn("remote", `Git remote contains embedded credentials for ${remoteCredential.host}`));
+  } else if (identity.gitRemote) {
+    checks.push(pass("remote", "Git remote does not contain embedded credentials"));
+  } else {
+    checks.push(warn("remote", "No git remote is configured"));
   }
 
-  const payload = { ok, checks };
+  if (!services.length) {
+    checks.push(warn("services", "No services are attached to this project context"));
+  } else if (missing.length > 0) {
+    checks.push(warn("services", `${missing.length} linked service(s) are missing local values`));
+  } else {
+    checks.push(pass("services", "All linked services are configured locally"));
+  }
+
+  if (suggestions.length > 0) {
+    checks.push(warn("suggestions", `${suggestions.length} local account(s) look relevant but are not attached`));
+  }
+
+  const ok = !checks.some((check) => check.status === "fail");
+  const payload = {
+    ok,
+    checks,
+    project: state.manifest.project,
+    root: state.root,
+    context: state.context,
+    identity: state.identity,
+    verification: state.verification,
+    services,
+    suggestions,
+    policyGuidance,
+    nextSteps
+  };
   if (flags.json) return printJson(payload);
-  for (const check of checks) {
-    console.log(`${check.status.toUpperCase()} ${check.name}: ${check.message}`);
-  }
+  printDoctor(payload);
   if (!ok) process.exitCode = 1;
 }
 
@@ -189,6 +224,7 @@ async function runCommand(args, flags, passthrough) {
   });
 
   if (!decision.allowed) {
+    const remediation = await remediationForPolicyDecision(decision, command, state, flags);
     await appendAudit(state, {
       at: new Date().toISOString(),
       project: state.manifest.project.id,
@@ -199,7 +235,11 @@ async function runCommand(args, flags, passthrough) {
       injected: [],
       missing: []
     });
-    throw new KeyrailError(decision.requiresConfirmation ? "CONFIRMATION_REQUIRED" : "POLICY_DENIED", decision.reason);
+    throw new KeyrailError(
+      decision.requiresConfirmation ? "CONFIRMATION_REQUIRED" : "POLICY_DENIED",
+      `${decision.reason}. ${remediation.message}`,
+      { nextSteps: remediation.nextSteps }
+    );
   }
 
   const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
@@ -242,7 +282,7 @@ async function runCommand(args, flags, passthrough) {
 
   if (secrets.missing.length > 0) {
     await appendAudit(state, { ...auditBase, decision: "missing_secrets" });
-    throw missingSecretsError(secrets.missing);
+    throw await missingSecretsError(secrets.missing, state);
   }
 
   const childEnv = { ...process.env, ...secrets.env };
@@ -269,15 +309,17 @@ async function deployCommand(args, flags) {
   const state = await getVerifiedState(flags.context);
   const reference = state.context.secrets.vercel;
   if (!reference) {
+    const remediation = await remediationForUnattachedSecret("vercel", state);
     throw new KeyrailError(
       "SECRET_NOT_FOUND",
-      "VERCEL_TOKEN is not configured for this project. Run keyrail attach vercel <reference> --value ... or keyrail status."
+      `VERCEL_TOKEN is not configured for this project. ${remediation.message}`,
+      { nextSteps: remediation.nextSteps }
     );
   }
 
   const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
   const secrets = await backend.resolveReferences({ vercel: reference });
-  if (secrets.missing.length > 0) throw missingSecretsError(secrets.missing);
+  if (secrets.missing.length > 0) throw await missingSecretsError(secrets.missing, state);
 
   return runCommand(command, flags, []);
 }
@@ -918,6 +960,37 @@ function printDeploymentStatus(payload) {
   console.log(`Next: ${payload.deployment.nextCommand}`);
 }
 
+function printDoctor(payload) {
+  console.log(`Keyrail doctor: ${payload.project.name} (${payload.project.id})`);
+  console.log(`Root: ${payload.root}`);
+  console.log(`Context: ${payload.context.name} (${payload.context.risk})`);
+  for (const check of payload.checks) {
+    console.log(`${check.status.toUpperCase()} ${check.name}: ${check.message}`);
+  }
+  if (payload.services.length) {
+    console.log("Linked services:");
+    for (const service of payload.services) {
+      console.log(`- ${service.service}: ${service.envName} (${service.configured ? "configured" : "missing"})`);
+    }
+  } else {
+    console.log("Linked services: none");
+  }
+  if (payload.suggestions.length) {
+    console.log("Suggested attachments:");
+    for (const suggestion of payload.suggestions) console.log(`- ${suggestion.command}`);
+  }
+  console.log("Command policy guidance:");
+  for (const guidance of payload.policyGuidance) {
+    console.log(`- ${guidance.command}: ${guidance.status}${guidance.nextCommand ? `; ${guidance.nextCommand}` : ""}`);
+  }
+  if (payload.nextSteps.length) {
+    console.log("Next steps:");
+    for (const step of payload.nextSteps) console.log(`- ${step.command} (${step.reason})`);
+  } else {
+    console.log("Next steps: none");
+  }
+}
+
 function printDryRun(payload) {
   console.log(`Dry run: ${payload.command}`);
   console.log(`Project: ${payload.project.name} (${payload.project.id})`);
@@ -937,32 +1010,226 @@ function printDryRun(payload) {
   } else {
     console.log("Missing:");
     for (const secret of payload.missing) {
-      console.log(`- ${secret.envName}: ${remediationForSecret(secret)}`);
+      console.log(`- ${secret.envName}: ${remediationMessageForSecret(secret)}`);
     }
   }
 }
 
 function nextRecommendedCommand(services, missingCount) {
-  if (!services.length) return "keyrail attach <service> <reference> --value ...";
+  if (!services.length) return "keyrail attach <service> <reference> --value-stdin";
   if (missingCount > 0) {
     const firstMissing = services.find((service) => !service.configured);
-    return `keyrail attach ${firstMissing.service} ${firstMissing.reference} --value ...`;
+    return `keyrail attach ${firstMissing.service} ${firstMissing.reference} --value-stdin`;
   }
   if (services.some((service) => service.service === "vercel")) return "keyrail deploy vercel --dry-run";
   return "keyrail run --dry-run -- <command>";
 }
 
-function missingSecretsError(missing) {
+async function missingSecretsError(missing, state = null) {
   const withEnvNames = missing.map((secret) => ({ ...secret, envName: secret.envName ?? envNameForProvider(secret.provider) }));
+  const remediations = state
+    ? await Promise.all(withEnvNames.map((secret) => remediationForMissingSecret(secret, state)))
+    : withEnvNames.map((secret) => ({
+        message: remediationMessageForSecret(secret),
+        nextSteps: [nextStep(`keyrail attach ${secret.provider} ${secret.reference} --value-stdin`, `Configure ${secret.envName}.`)]
+      }));
   const first = withEnvNames[0];
   const message = withEnvNames.length === 1
-    ? `${first.envName} is not configured. ${remediationForSecret(first)}`
-    : `${withEnvNames.length} secret references are not configured. ${withEnvNames.map(remediationForSecret).join(" ")}`;
-  return new KeyrailError("SECRET_NOT_FOUND", message, { missing: withEnvNames });
+    ? `${first.envName} is not configured. ${remediations[0].message}`
+    : `${withEnvNames.length} secret references are not configured. ${remediations.map((item) => item.message).join(" ")}`;
+  return new KeyrailError("SECRET_NOT_FOUND", message, {
+    missing: withEnvNames,
+    nextSteps: remediations.flatMap((item) => item.nextSteps)
+  });
 }
 
-function remediationForSecret(secret) {
-  return `Run keyrail attach ${secret.provider} ${secret.reference} --value ... or keyrail status.`;
+function remediationMessageForSecret(secret) {
+  return `Run keyrail attach ${secret.provider} ${secret.reference} --value-stdin or keyrail doctor.`;
+}
+
+async function remediationForMissingSecret(secret, state) {
+  const suggestions = await suggestionsForService(secret.provider, state);
+  const exact = suggestions.find((suggestion) => suggestion.reference === secret.reference);
+  if (exact) {
+    return {
+      message: `Run ${exact.command} --value-stdin, then retry.`,
+      nextSteps: [
+        nextStep(`${exact.command} --value-stdin`, `Attach and store ${secret.envName}.`),
+        nextStep("keyrail doctor", "Verify project routing and linked-service readiness.")
+      ]
+    };
+  }
+
+  return {
+    message: remediationMessageForSecret(secret),
+    nextSteps: [
+      nextStep(`keyrail attach ${secret.provider} ${secret.reference} --value-stdin`, `Store ${secret.envName} for the attached reference.`),
+      nextStep("keyrail doctor", "Verify project routing and linked-service readiness.")
+    ]
+  };
+}
+
+async function remediationForUnattachedSecret(provider, state) {
+  const envName = envNameForProvider(provider);
+  const suggestions = await suggestionsForService(provider, state);
+  if (suggestions.length === 1) {
+    const command = `${suggestions[0].command} --value-stdin`;
+    return {
+      message: `Run ${command}, then retry.`,
+      nextSteps: [
+        nextStep(command, `Attach the available ${provider} account to this project.`),
+        nextStep("keyrail doctor", "Verify linked-service readiness.")
+      ]
+    };
+  }
+
+  if (suggestions.length > 1) {
+    return {
+      message: `Choose an account with keyrail attach ${provider} <reference> --value-stdin, then retry.`,
+      nextSteps: [
+        ...suggestions.map((suggestion) => nextStep(`${suggestion.command} --value-stdin`, `Attach ${provider}:${suggestion.reference}.`)),
+        nextStep("keyrail doctor", "Verify linked-service readiness.")
+      ]
+    };
+  }
+
+  return {
+    message: `Run keyrail attach ${provider} <reference> --value-stdin, then retry.`,
+    nextSteps: [
+      nextStep(`keyrail attach ${provider} <reference> --value-stdin`, `Attach and store ${envName}.`),
+      nextStep("keyrail auth add <service> <name> --value-stdin", "Save a reusable local account before attaching if needed.")
+    ]
+  };
+}
+
+async function remediationForPolicyDecision(decision, command, state, flags = {}) {
+  const normalized = normalizeCommand(command);
+  if (decision.requiresConfirmation) {
+    const confirmCommand = confirmationCommandFor(normalized, flags);
+    return {
+      message: "Retry with --yes or set KEYRAIL_CONFIRM=1 after confirming the project/context.",
+      nextSteps: [
+        nextStep(confirmCommand, "Confirm this command for the current context."),
+        nextStep("keyrail doctor", "Review identity, context risk, and policy guidance.")
+      ]
+    };
+  }
+
+  const policyAction = policyActionForCommand(normalized, state.manifest.policy);
+  return {
+    message: `Review with keyrail doctor or allow it with ${policyAction}.`,
+    nextSteps: [
+      nextStep("keyrail doctor", "See policy guidance for common commands in this repo."),
+      nextStep(policyAction, "Add a narrow allow rule if this command is expected.")
+    ]
+  };
+}
+
+function confirmationCommandFor(command, flags = {}) {
+  if (command.startsWith("vercel deploy")) {
+    return `keyrail deploy vercel${command.includes("--prod") ? " --prod" : ""} --yes${flags.dryRun ? " --dry-run" : ""}`;
+  }
+  return `keyrail run --yes -- ${command}`;
+}
+
+function policyActionForCommand(command, policy) {
+  const denied = (policy.deny ?? []).find((pattern) => command.startsWith(pattern));
+  if (denied) return `keyrail policy show --json # denied by "${denied}"`;
+  return `keyrail policy allow -- ${command}`;
+}
+
+async function suggestionsForService(service, state) {
+  const profile = await readProfile();
+  return Object.keys(profile.accounts[service] ?? {}).sort().map((reference) => ({
+    type: "attach",
+    service,
+    reference,
+    command: `keyrail attach ${service} ${reference}`,
+    reason: `Local ${service} account is available but not attached to this project.`
+  }));
+}
+
+function buildDoctorNextSteps({ state, verification, services, missing, suggestions }) {
+  const steps = [];
+  if (!verification.verified) {
+    steps.push(nextStep("keyrail status --json", "Inspect the active project identity and configured repo."));
+  }
+  for (const suggestion of suggestions) {
+    steps.push(nextStep(suggestion.command, suggestion.reason));
+  }
+  for (const secret of missing) {
+    const envName = secret.envName ?? envNameForProvider(secret.provider);
+    steps.push(nextStep(`keyrail attach ${secret.provider} ${secret.reference} --value-stdin`, `Store ${envName} for the linked ${secret.provider} reference.`));
+  }
+  if (!services.length && !suggestions.length) {
+    steps.push(nextStep("keyrail attach <service> <reference> --value-stdin", "Attach the service account this project needs."));
+  }
+  steps.push(nextStep("keyrail run --dry-run -- <command>", "Check policy and injected env var names before execution."));
+  if (services.some((service) => service.service === "vercel")) {
+    steps.push(nextStep("keyrail deploy vercel --dry-run", "Validate the Vercel deployment path."));
+  }
+  return dedupeNextSteps(steps);
+}
+
+function buildPolicyGuidance(state) {
+  const commands = [
+    ["gh issue list", "GitHub read-only project command"],
+    ["vercel deploy", "Vercel deploy"],
+    ["vercel deploy --prod", "Production Vercel deploy"],
+    ["supabase db push", "Supabase schema push"],
+    ["gh repo delete", "Repository deletion"]
+  ];
+  return commands.map(([command, description]) => {
+    const decision = evaluatePolicy({
+      command: command.split(/\s+/),
+      context: state.context,
+      policy: state.manifest.policy,
+      confirmed: false
+    });
+    const status = decision.allowed ? "allowed" : (decision.requiresConfirmation ? "requires confirmation" : "denied");
+    let nextCommand = `keyrail run --dry-run -- ${command}`;
+    if (decision.requiresConfirmation) nextCommand = `keyrail run --yes -- ${command}`;
+    else if (!decision.allowed) {
+      nextCommand = (state.manifest.policy.deny ?? []).some((pattern) => command.startsWith(pattern))
+        ? "keyrail policy show --json"
+        : `keyrail policy allow -- ${command}`;
+    }
+    return { command, description, status, reason: decision.reason ?? "allowed", nextCommand };
+  });
+}
+
+function verifyProjectIdentity(identity, manifest) {
+  try {
+    return verifyIdentity(identity, manifest);
+  } catch (error) {
+    return {
+      verified: false,
+      reason: error.message,
+      code: error.code ?? "IDENTITY_UNVERIFIED",
+      expected: error.details?.expected,
+      actual: error.details?.actual
+    };
+  }
+}
+
+function embeddedCredentialRemote(remote) {
+  if (!remote) return null;
+  const match = remote.match(/^[a-z][a-z0-9+.-]*:\/\/([^/\s@]+)@([^/\s]+)/i);
+  if (!match) return null;
+  return { userinfo: match[1], host: match[2] };
+}
+
+function nextStep(command, reason) {
+  return { command, reason };
+}
+
+function dedupeNextSteps(steps) {
+  const seen = new Set();
+  return steps.filter((step) => {
+    if (seen.has(step.command)) return false;
+    seen.add(step.command);
+    return true;
+  });
 }
 
 async function spawnRedacted(command, env, secretValues) {
