@@ -314,10 +314,8 @@ async function handoffCommand(flags) {
 
 async function linkCommand(args, flags) {
   const service = args[0] ?? flags.service;
-  const reference = args[1] ?? flags.reference;
-  if (!service || !reference) {
-    throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail attach <service> <name> [--value <secret>]");
-  }
+  if (!service) throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail attach <service> <name> [--value <secret>]");
+  const reference = await resolveAttachReference(service, args[1] ?? flags.reference);
 
   const loaded = await loadProjectState(process.cwd());
   const contextName = await resolveProjectContextName(loaded, flags.context);
@@ -333,6 +331,25 @@ async function linkCommand(args, flags) {
   }
 
   console.log(`Linked ${service} to ${reference} for ${loaded.manifest.project.id}/${contextName}`);
+}
+
+async function resolveAttachReference(service, requestedReference) {
+  if (requestedReference) return requestedReference;
+
+  const profile = await readProfile();
+  const candidates = Object.keys(profile.accounts[service] ?? {}).sort();
+  if (candidates.length === 1) return candidates[0];
+
+  if (candidates.length > 1) {
+    const defaultReference = profile.services[service]?.reference;
+    const defaultText = defaultReference ? ` Default: ${defaultReference}.` : "";
+    throw new KeyrailError(
+      "AMBIGUOUS_ACCOUNT",
+      `Multiple ${service} accounts are available.${defaultText} Candidates: ${candidates.join(", ")}. Run keyrail attach ${service} <reference>.`
+    );
+  }
+
+  throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail attach <service> <name> [--value <secret>]");
 }
 
 async function unlinkCommand(args, flags) {
@@ -803,6 +820,7 @@ async function buildStatusPayload(state, flags = {}) {
   }));
   const missingCount = services.filter((service) => !service.configured).length;
   const nextCommand = nextRecommendedCommand(services, missingCount);
+  const suggestions = await buildStatusSuggestions(state, services);
 
   return {
     project: state.manifest.project,
@@ -830,8 +848,52 @@ async function buildStatusPayload(state, flags = {}) {
     agent: {
       verified: true,
       instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
-    }
+    },
+    suggestions
   };
+}
+
+async function buildStatusSuggestions(state, services) {
+  const profile = await readProfile();
+  const attachedServices = new Set(services.map((service) => service.service));
+  const relevantServices = servicesRelevantToProject(state, profile);
+  const suggestions = [];
+
+  for (const service of relevantServices) {
+    if (attachedServices.has(service)) continue;
+    const accounts = Object.keys(profile.accounts[service] ?? {}).sort();
+    for (const reference of accounts) {
+      suggestions.push({
+        type: "attach",
+        service,
+        reference,
+        command: `keyrail attach ${service} ${reference}`,
+        reason: `Local ${service} account is available but not attached to this project.`
+      });
+    }
+  }
+
+  return suggestions;
+}
+
+function servicesRelevantToProject(state, profile) {
+  const available = new Set(Object.keys(profile.accounts ?? {}));
+  const relevant = new Set(Object.keys(state.context.secrets ?? {}));
+  const policyCommands = [
+    ...(state.manifest.policy.allow ?? []),
+    ...(state.manifest.policy.requireConfirm ?? []),
+    ...(state.manifest.policy.deny ?? [])
+  ].join(" ");
+  const repo = state.manifest.project.repo ?? state.identity.gitRemote ?? "";
+
+  if (available.has("github") && (/\bgh\b|\bgithub\b/i.test(policyCommands) || /github\.com[:/]/i.test(repo))) {
+    relevant.add("github");
+  }
+  if (available.has("vercel") && /\bvercel\b/i.test(policyCommands)) {
+    relevant.add("vercel");
+  }
+
+  return [...relevant].filter((service) => available.has(service)).sort();
 }
 
 function printDeploymentStatus(payload) {
@@ -845,6 +907,12 @@ function printDeploymentStatus(payload) {
     console.log("Services:");
     for (const service of payload.services) {
       console.log(`- ${service.service}: ${service.envName} (${service.configured ? "configured" : "missing"})`);
+    }
+  }
+  if (payload.suggestions?.length) {
+    console.log("Suggestions:");
+    for (const suggestion of payload.suggestions) {
+      console.log(`- ${suggestion.command}`);
     }
   }
   console.log(`Next: ${payload.deployment.nextCommand}`);

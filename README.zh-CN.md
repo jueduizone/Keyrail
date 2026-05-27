@@ -93,6 +93,8 @@ keyrail attach vercel acme-vercel
 keyrail attach supabase acme-supabase
 ```
 
+如果某个 service 只保存了一个账号，`keyrail attach <service>` 会自动使用它；如果保存了多个账号，Keyrail 会直接提示默认账号和候选列表，要求显式写出 reference，避免绑错。
+
 也可以绑定并同时保存本地值：
 
 ```bash
@@ -150,7 +152,7 @@ keyrail run -- gh repo view
 keyrail status --json
 ```
 
-返回内容会包含项目身份、active context、已绑定服务、对应环境变量名、key 是否已配置，以及提示 Agent 使用 `keyrail run -- <command>`。
+返回内容会包含项目身份、active context、已绑定服务、对应环境变量名、key 是否已配置、当前 repo 可直接绑定但尚未绑定的账号建议（`suggestions`），以及提示 Agent 使用 `keyrail run -- <command>`。
 
 示例：
 

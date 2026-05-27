@@ -326,6 +326,74 @@ test("auth can keep multiple accounts for the same service", async () => {
   assert.equal(after.services.github.reference, "personal");
 });
 
+test("attach without reference uses the single saved account for that service", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-attach-single-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-attach-single-home-"));
+
+  assert.equal(run(["auth", "add", "github", "jueduizone", "--value", "DUMMY_SINGLE_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+
+  const attach = run(["attach", "github"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(attach.status, 0, attach.stderr);
+  assert.match(attach.stdout, /Linked github to jueduizone/);
+
+  const status = JSON.parse(run(["status", "--json"], cwd, { KEYRAIL_HOME: keyrailHome }).stdout);
+  assert.equal(status.services[0].service, "github");
+  assert.equal(status.services[0].reference, "jueduizone");
+});
+
+test("attach without reference names default and candidates when multiple accounts exist", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-attach-ambiguous-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-attach-ambiguous-home-"));
+
+  assert.equal(run(["auth", "add", "github", "personal", "--value", "DUMMY_PERSONAL_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+  assert.equal(run(["auth", "add", "github", "work", "--value", "DUMMY_WORK_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+
+  const attach = run(["attach", "github"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.notEqual(attach.status, 0);
+  assert.match(attach.stderr, /Multiple github accounts are available/);
+  assert.match(attach.stderr, /Default: work/);
+  assert.match(attach.stderr, /Candidates: personal, work/);
+  assert.match(attach.stderr, /keyrail attach github <reference>/);
+});
+
+test("status suggests locally available unattached accounts relevant to the repo", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-status-suggestions-cwd-"));
+  const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-status-suggestions-home-"));
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "suggestion-demo" }));
+
+  assert.equal(run(["auth", "add", "github", "jueduizone", "--value", "DUMMY_SUGGEST_GITHUB_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+  assert.equal(run(["auth", "add", "vercel", "preview", "--value", "DUMMY_SUGGEST_VERCEL_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+  assert.equal(run(["auth", "add", "stripe", "billing", "--value", "DUMMY_SUGGEST_STRIPE_TOKEN"], cwd, {
+    KEYRAIL_HOME: keyrailHome
+  }).status, 0);
+
+  const jsonStatus = run(["status", "--json"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(jsonStatus.status, 0, jsonStatus.stderr);
+  const payload = JSON.parse(jsonStatus.stdout);
+  assert.deepEqual(payload.services, []);
+  assert.deepEqual(payload.suggestions.map((suggestion) => suggestion.command), [
+    "keyrail attach github jueduizone",
+    "keyrail attach vercel preview"
+  ]);
+
+  const humanStatus = run(["status"], cwd, { KEYRAIL_HOME: keyrailHome });
+  assert.equal(humanStatus.status, 0, humanStatus.stderr);
+  assert.match(humanStatus.stdout, /Suggestions:/);
+  assert.match(humanStatus.stdout, /keyrail attach github jueduizone/);
+  assert.match(humanStatus.stdout, /keyrail attach vercel preview/);
+  assert.doesNotMatch(humanStatus.stdout, /stripe/);
+});
+
 test("profile set accepts secret values from stdin", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-profile-stdin-cwd-"));
   const keyrailHome = await mkdtemp(path.join(os.tmpdir(), "keyrail-stdin-home-"));

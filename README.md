@@ -91,6 +91,8 @@ keyrail attach vercel acme-vercel
 keyrail attach supabase acme-supabase
 ```
 
+If only one saved account exists for a service, `keyrail attach <service>` uses it automatically. If more than one exists, Keyrail prints the default account and candidates so the reference is explicit.
+
 You can also attach and store a local value in one step:
 
 ```bash
@@ -148,7 +150,7 @@ Tell agents to start with:
 keyrail status --json
 ```
 
-The response includes project identity, active context, linked services, env var names, configured/missing status, and the instruction to use `keyrail run -- <command>`.
+The response includes project identity, active context, linked services, env var names, configured/missing status, suggestions for relevant saved accounts that are not attached yet, and the instruction to use `keyrail run -- <command>`.
 
 Example:
 
