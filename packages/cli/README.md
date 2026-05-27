@@ -5,6 +5,8 @@ Local-first project identity and credential routing for agent-assisted developme
 ```bash
 npx @keyrail/cli attach github personal
 npx @keyrail/cli status
+npx @keyrail/cli run --dry-run -- vercel deploy
+npx @keyrail/cli deploy vercel --prod --yes
 npx @keyrail/cli ui
 ```
 

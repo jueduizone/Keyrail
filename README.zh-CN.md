@@ -23,7 +23,8 @@ keyrail attach vercel my-project-vercel
 keyrail attach supabase my-project-supabase
 
 keyrail status --json
-keyrail run -- vercel deploy
+keyrail run --dry-run -- vercel deploy
+keyrail deploy vercel
 ```
 
 给小白用户使用图形界面：
@@ -55,6 +56,8 @@ Keyrail 的目标是消除这种歧义，同时不要求协作者也必须安装
 - 只在 `keyrail run` 启动的子进程中注入 key
 - 对命令输出做脱敏
 - 通过 `status --json` 给 Agent 结构化上下文
+- 部署前用 `run --dry-run` 检查会注入哪些环境变量、缺哪些 key，不执行真实命令
+- 提供 `keyrail deploy vercel` 作为 Vercel 部署快捷入口
 - 提供本地图形界面，方便非技术用户管理
 
 ## 安装
@@ -106,7 +109,9 @@ keyrail status --json
 
 ```bash
 keyrail run -- gh issue list
+keyrail run --dry-run -- vercel deploy
 keyrail run -- vercel deploy
+keyrail deploy vercel --prod --yes
 keyrail run -- supabase db push
 ```
 
@@ -160,15 +165,33 @@ keyrail status --json
       "service": "vercel",
       "reference": "acme-vercel-token",
       "envName": "VERCEL_TOKEN",
-      "configured": true
+      "configured": true,
+      "state": "configured"
     }
   ],
+  "deployment": {
+    "project": {
+      "id": "acme-web",
+      "name": "Acme Web",
+      "root": "/path/to/acme-web"
+    },
+    "context": {
+      "name": "local",
+      "risk": "low",
+      "requireConfirmation": false
+    },
+    "ready": true,
+    "missingCount": 0,
+    "nextCommand": "keyrail deploy vercel --dry-run"
+  },
   "agent": {
     "verified": true,
     "instruction": "Use keyrail run -- <command> so this project receives only its linked service keys."
   }
 }
 ```
+
+部署前建议先运行 `keyrail run --dry-run -- <command>`，它只显示策略判断、会注入的环境变量名和缺失引用，不执行子命令，也不会打印 secret 值。`keyrail deploy vercel [--prod] [--yes] [--dry-run]` 是 Vercel 部署快捷入口；`--yes` 会同时确认 Keyrail 策略并传给 Vercel。
 
 ## 本地 UI
 

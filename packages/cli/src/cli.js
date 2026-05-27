@@ -43,6 +43,8 @@ export async function main(argv) {
       return doctorCommand(flags);
     case "run":
       return runCommand(args, flags, passthrough);
+    case "deploy":
+      return deployCommand(args, flags);
     case "handoff":
       return handoffCommand(flags);
     case "link":
@@ -121,31 +123,10 @@ async function bindCommand(flags) {
 
 async function currentCommand(flags) {
   const state = await getVerifiedState(flags.context);
-  const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
-  const secrets = await secretBackend.listReferences(state.context.secrets);
-  const services = secrets.map((secret) => ({
-    service: secret.provider,
-    reference: secret.reference,
-    envName: secret.envName,
-    configured: secret.configured
-  }));
-  const payload = {
-    project: state.manifest.project,
-    context: state.context,
-    identity: state.identity,
-    services,
-    agent: {
-      verified: true,
-      instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
-    }
-  };
+  const payload = await buildStatusPayload(state, flags);
 
   if (flags.json) return printJson(payload);
-  console.log(`${state.manifest.project.name} (${state.manifest.project.id})`);
-  console.log(`Root: ${state.root}`);
-  console.log(`Context: ${state.context.name} (${state.context.risk})`);
-  console.log(`Identity: ${state.verification.reason}`);
-  printServiceLinks(services);
+  printDeploymentStatus(payload);
 }
 
 async function identifyCommand(flags) {
@@ -223,26 +204,82 @@ async function runCommand(args, flags, passthrough) {
 
   const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
   const secrets = await backend.resolveReferences(state.context.secrets);
-  const childEnv = { ...process.env, ...secrets.env };
-  const secretValues = Object.values(secrets.env);
-  const audit = {
+  const auditBase = {
     at: new Date().toISOString(),
     project: state.manifest.project.id,
     context: state.context.name,
     command: normalizeCommand(command),
-    decision: "allowed",
     injected: secrets.resolved.map(({ provider, reference, envName }) => ({ provider, reference, envName })),
-    missing: secrets.missing
+    missing: secrets.missing.map((secret) => ({ ...secret, envName: secret.envName ?? envNameForProvider(secret.provider) }))
   };
 
-  console.error(`keyrail: running ${audit.command} in ${audit.project}/${audit.context}`);
-  if (secrets.missing.length > 0) {
-    console.error(`keyrail: ${secrets.missing.length} secret reference(s) missing; running without those values`);
+  if (flags.dryRun) {
+    const payload = {
+      project: {
+        id: state.manifest.project.id,
+        name: state.manifest.project.name,
+        root: state.root
+      },
+      context: {
+        name: state.context.name,
+        risk: state.context.risk,
+        requireConfirmation: state.context.requireConfirmation
+      },
+      command: normalizeCommand(command),
+      policy: {
+        allowed: true,
+        reason: decision.reason ?? "allowed"
+      },
+      injected: auditBase.injected,
+      missing: auditBase.missing,
+      wouldExecute: false
+    };
+    await appendAudit(state, { ...auditBase, decision: "dry_run" });
+    if (flags.json) return printJson(payload);
+    printDryRun(payload);
+    return;
   }
+
+  if (secrets.missing.length > 0) {
+    await appendAudit(state, { ...auditBase, decision: "missing_secrets" });
+    throw missingSecretsError(secrets.missing);
+  }
+
+  const childEnv = { ...process.env, ...secrets.env };
+  const secretValues = Object.values(secrets.env);
+  const audit = { ...auditBase, decision: "allowed" };
+
+  console.error(`keyrail: running ${audit.command} in ${audit.project}/${audit.context}`);
 
   const exitCode = await spawnRedacted(command, childEnv, secretValues);
   await appendAudit(state, audit);
   process.exitCode = exitCode;
+}
+
+async function deployCommand(args, flags) {
+  const target = args[0];
+  if (target !== "vercel") {
+    throw new KeyrailError("INVALID_ARGUMENTS", "Use keyrail deploy vercel [--prod] [--yes]");
+  }
+
+  const command = ["vercel", "deploy"];
+  if (flags.prod) command.push("--prod");
+  if (flags.yes) command.push("--yes");
+
+  const state = await getVerifiedState(flags.context);
+  const reference = state.context.secrets.vercel;
+  if (!reference) {
+    throw new KeyrailError(
+      "SECRET_NOT_FOUND",
+      "VERCEL_TOKEN is not configured for this project. Run keyrail attach vercel <reference> --value ... or keyrail status."
+    );
+  }
+
+  const backend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
+  const secrets = await backend.resolveReferences({ vercel: reference });
+  if (secrets.missing.length > 0) throw missingSecretsError(secrets.missing);
+
+  return runCommand(command, flags, []);
 }
 
 async function handoffCommand(flags) {
@@ -754,6 +791,112 @@ function printServiceLinks(services) {
   }
 }
 
+async function buildStatusPayload(state, flags = {}) {
+  const secretBackend = createSecretBackend({ type: flags.secretBackend ?? "local-file", root: state.root });
+  const secrets = await secretBackend.listReferences(state.context.secrets);
+  const services = secrets.map((secret) => ({
+    service: secret.provider,
+    reference: secret.reference,
+    envName: secret.envName,
+    configured: secret.configured,
+    state: secret.configured ? "configured" : "missing"
+  }));
+  const missingCount = services.filter((service) => !service.configured).length;
+  const nextCommand = nextRecommendedCommand(services, missingCount);
+
+  return {
+    project: state.manifest.project,
+    root: state.root,
+    context: state.context,
+    identity: state.identity,
+    verification: state.verification,
+    services,
+    deployment: {
+      project: {
+        id: state.manifest.project.id,
+        name: state.manifest.project.name,
+        root: state.root
+      },
+      context: {
+        name: state.context.name,
+        risk: state.context.risk,
+        requireConfirmation: state.context.requireConfirmation
+      },
+      services,
+      ready: missingCount === 0,
+      missingCount,
+      nextCommand
+    },
+    agent: {
+      verified: true,
+      instruction: "Use keyrail run -- <command> so this project receives only its linked service keys."
+    }
+  };
+}
+
+function printDeploymentStatus(payload) {
+  console.log(`${payload.project.name} (${payload.project.id})`);
+  console.log(`Root: ${payload.root}`);
+  console.log(`Context: ${payload.context.name} (${payload.context.risk})`);
+  console.log(`Identity: ${payload.verification.reason}`);
+  if (!payload.services.length) {
+    console.log("Services: none attached");
+  } else {
+    console.log("Services:");
+    for (const service of payload.services) {
+      console.log(`- ${service.service}: ${service.envName} (${service.configured ? "configured" : "missing"})`);
+    }
+  }
+  console.log(`Next: ${payload.deployment.nextCommand}`);
+}
+
+function printDryRun(payload) {
+  console.log(`Dry run: ${payload.command}`);
+  console.log(`Project: ${payload.project.name} (${payload.project.id})`);
+  console.log(`Root: ${payload.project.root}`);
+  console.log(`Context: ${payload.context.name} (${payload.context.risk})`);
+  console.log(`Policy: ${payload.policy.allowed ? "allowed" : "denied"}`);
+  if (!payload.injected.length) {
+    console.log("Would inject: none");
+  } else {
+    console.log("Would inject:");
+    for (const secret of payload.injected) {
+      console.log(`- ${secret.envName} from ${secret.provider}:${secret.reference}`);
+    }
+  }
+  if (!payload.missing.length) {
+    console.log("Missing: none");
+  } else {
+    console.log("Missing:");
+    for (const secret of payload.missing) {
+      console.log(`- ${secret.envName}: ${remediationForSecret(secret)}`);
+    }
+  }
+}
+
+function nextRecommendedCommand(services, missingCount) {
+  if (!services.length) return "keyrail attach <service> <reference> --value ...";
+  if (missingCount > 0) {
+    const firstMissing = services.find((service) => !service.configured);
+    return `keyrail attach ${firstMissing.service} ${firstMissing.reference} --value ...`;
+  }
+  if (services.some((service) => service.service === "vercel")) return "keyrail deploy vercel --dry-run";
+  return "keyrail run --dry-run -- <command>";
+}
+
+function missingSecretsError(missing) {
+  const withEnvNames = missing.map((secret) => ({ ...secret, envName: secret.envName ?? envNameForProvider(secret.provider) }));
+  const first = withEnvNames[0];
+  const message = withEnvNames.length === 1
+    ? `${first.envName} is not configured. ${remediationForSecret(first)}`
+    : `${withEnvNames.length} secret references are not configured. ${withEnvNames.map(remediationForSecret).join(" ")}`;
+  return new KeyrailError("SECRET_NOT_FOUND", message, { missing: withEnvNames });
+}
+
+function remediationForSecret(secret) {
+  return `Run keyrail attach ${secret.provider} ${secret.reference} --value ... or keyrail status.`;
+}
+
 async function spawnRedacted(command, env, secretValues) {
   try {
     return await new Promise((resolve, reject) => {
@@ -825,7 +968,8 @@ Usage:
   keyrail detach <service>
   keyrail with github [name] -- <command>
   keyrail status [--json] [--context <name>]
-  keyrail run [--context <name>] [--yes] -- <command>
+  keyrail run [--dry-run] [--context <name>] [--yes] -- <command>
+  keyrail deploy vercel [--prod] [--yes] [--dry-run]
   keyrail ui [--port <port>] [--token <token>]
 
 Advanced:

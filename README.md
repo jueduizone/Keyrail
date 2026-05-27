@@ -23,7 +23,8 @@ keyrail attach vercel my-project-vercel
 keyrail attach supabase my-project-supabase
 
 keyrail status --json
-keyrail run -- vercel deploy
+keyrail run --dry-run -- vercel deploy
+keyrail deploy vercel
 ```
 
 For a beginner-friendly local manager:
@@ -105,9 +106,11 @@ keyrail status --json
 Run commands with the project's linked keys:
 
 ```bash
+keyrail run --dry-run -- vercel deploy
 keyrail run -- gh issue list
 keyrail run -- vercel deploy
 keyrail run -- supabase db push
+keyrail deploy vercel --prod --yes
 ```
 
 Open the local UI:
@@ -160,15 +163,33 @@ Example:
       "service": "vercel",
       "reference": "acme-vercel-token",
       "envName": "VERCEL_TOKEN",
-      "configured": true
+      "configured": true,
+      "state": "configured"
     }
   ],
+  "deployment": {
+    "project": {
+      "id": "acme-web",
+      "name": "Acme Web",
+      "root": "/path/to/acme-web"
+    },
+    "context": {
+      "name": "local",
+      "risk": "low",
+      "requireConfirmation": false
+    },
+    "ready": true,
+    "missingCount": 0,
+    "nextCommand": "keyrail deploy vercel --dry-run"
+  },
   "agent": {
     "verified": true,
     "instruction": "Use keyrail run -- <command> so this project receives only its linked service keys."
   }
 }
 ```
+
+Use `keyrail run --dry-run -- <command>` before deploys to see policy results, injected env var names, and missing references without executing the child command. `keyrail deploy vercel [--prod] [--yes] [--dry-run]` is an alias for the Vercel deploy workflow and requires `VERCEL_TOKEN` to be attached and configured. `--yes` confirms Keyrail policy and is forwarded to Vercel.
 
 ## Local UI
 

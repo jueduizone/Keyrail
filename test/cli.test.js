@@ -43,6 +43,33 @@ test("run redacts injected secrets from child output", async () => {
   assert.doesNotMatch(result.stdout, /DUMMY_OPENAI_TOKEN_FOR_TESTS/);
 });
 
+test("run dry-run reports injected and missing env vars without executing", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-dry-run-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const manifestPath = path.join(cwd, ".agent-context.yaml");
+  const markerPath = path.join(cwd, "executed.txt");
+  const manifest = await readFile(manifestPath, "utf8");
+  await writeFile(
+    manifestPath,
+    manifest
+      .replace("secrets: {}", "secrets:\n      openai: demo-openai\n      stripe: demo-stripe")
+      .replace("allow:\n    - gh issue list", "allow:\n    - node -e")
+  );
+  await mkdir(path.join(cwd, ".keyrail"), { recursive: true });
+  await writeFile(path.join(cwd, ".keyrail", "secrets.local.json"), JSON.stringify({ "demo-openai": "DUMMY_DRY_RUN_OPENAI_TOKEN" }));
+
+  const result = run(["run", "--dry-run", "--", "node", "-e", `require('fs').writeFileSync(${JSON.stringify(markerPath)}, 'ran')`], cwd);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Would inject:/);
+  assert.match(result.stdout, /OPENAI_API_KEY/);
+  assert.match(result.stdout, /Missing:/);
+  assert.match(result.stdout, /STRIPE_API_KEY/);
+  assert.match(result.stdout, /keyrail attach stripe demo-stripe --value/);
+  assert.doesNotMatch(result.stdout, /DUMMY_DRY_RUN_OPENAI_TOKEN/);
+  await assert.rejects(stat(markerPath), { code: "ENOENT" });
+});
+
 test("ui renders current project state", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-ui-"));
   run(["init", "--id", "demo", "--repo", "local"], cwd);
@@ -121,10 +148,53 @@ test("attach status and detach provide the human-friendly service routing workfl
   const payload = JSON.parse(status.stdout);
   assert.equal(payload.services[0].service, "vercel");
   assert.equal(payload.services[0].reference, "demo-vercel");
+  assert.equal(payload.root, cwd);
+  assert.equal(payload.deployment.project.id, "demo");
+  assert.equal(payload.deployment.project.root, cwd);
+  assert.equal(payload.deployment.context.name, "local");
+  assert.equal(payload.deployment.services[0].envName, "VERCEL_TOKEN");
+  assert.equal(payload.deployment.services[0].state, "missing");
+  assert.match(payload.deployment.nextCommand, /keyrail attach vercel demo-vercel --value/);
 
   const detach = run(["detach", "vercel"], cwd);
   assert.equal(detach.status, 0, detach.stderr);
   assert.deepEqual(JSON.parse(run(["status", "--json"], cwd).stdout).services, []);
+});
+
+test("deploy vercel alias dry-run resolves to vercel deploy with policy and VERCEL_TOKEN", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-deploy-vercel-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+  assert.equal(run(["attach", "vercel", "demo-vercel", "--value", "DUMMY_VERCEL_TOKEN"], cwd).status, 0);
+
+  const result = run(["deploy", "vercel", "--dry-run"], cwd);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Dry run: vercel deploy/);
+  assert.match(result.stdout, /VERCEL_TOKEN/);
+  assert.doesNotMatch(result.stdout, /DUMMY_VERCEL_TOKEN/);
+
+  const prod = run(["deploy", "vercel", "--prod", "--dry-run"], cwd);
+  assert.notEqual(prod.status, 0);
+  assert.match(prod.stderr, /CONFIRMATION_REQUIRED/);
+
+  const prodConfirmed = run(["deploy", "vercel", "--prod", "--yes", "--dry-run"], cwd);
+  assert.equal(prodConfirmed.status, 0, prodConfirmed.stderr);
+  assert.match(prodConfirmed.stdout, /Dry run: vercel deploy --prod --yes/);
+});
+
+test("deploy vercel reports exact remediation when VERCEL_TOKEN is missing", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "keyrail-deploy-missing-"));
+  run(["init", "--id", "demo", "--repo", "local"], cwd);
+
+  const unattached = run(["deploy", "vercel", "--dry-run"], cwd);
+  assert.notEqual(unattached.status, 0);
+  assert.match(unattached.stderr, /VERCEL_TOKEN is not configured/);
+  assert.match(unattached.stderr, /keyrail attach vercel <reference> --value/);
+
+  assert.equal(run(["attach", "vercel", "demo-vercel"], cwd).status, 0);
+  const missingValue = run(["deploy", "vercel", "--dry-run"], cwd);
+  assert.notEqual(missingValue.status, 0);
+  assert.match(missingValue.stderr, /VERCEL_TOKEN is not configured/);
+  assert.match(missingValue.stderr, /keyrail attach vercel demo-vercel --value/);
 });
 
 test("attach and run work without project init or project files", async () => {
